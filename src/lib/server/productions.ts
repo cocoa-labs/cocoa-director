@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { ProductionCreateRequest, type SourceBundle, type SourceFragment, type VideoJob, type WorkflowStep } from "@/lib/schemas";
 import { isExplicitBreakingClaim } from "@/lib/news-claims";
+import { editorialNarrationTiming } from "@/lib/editorial-narration";
 import { applyValidatedLikenessRouting, attachVisualPlanToStoryboard, buildHybridVisualPlan, narrationBudgetSummary } from "@/lib/hybrid-visuals";
 import { ApiRequestError } from "@/lib/server/api-error";
 import type { UserContext } from "@/lib/server/auth";
@@ -238,9 +239,10 @@ export async function fitProductionEditorialDraft(job: VideoJob, user: UserConte
     qualityTier: job.qualityTier ?? "standard",
   });
 
-  const fittedOutline = await fitNewsEditorialOutline({ request, sourceBundle: job.sourceBundle, currentOutline: job.editorialPlan.scenes });
-  const fittedBudget = narrationBudgetSummary(fittedOutline.map((scene) => scene.narration).join(" "), job.durationSeconds);
-  if (fittedBudget.predictedCoverage < 0.75 || !fittedBudget.withinBudget) {
+  const pacing = editorialNarrationTiming(job).pacing;
+  const fittedOutline = await fitNewsEditorialOutline({ request, sourceBundle: job.sourceBundle, currentOutline: job.storyboard.scenes, pacing });
+  const fittedBudget = narrationBudgetSummary(fittedOutline.map((scene) => scene.narration).join(" "), job.durationSeconds, pacing ? { ...pacing, sceneCount: fittedOutline.length } : undefined);
+  if (fittedBudget.words < fittedBudget.minimumWords || !fittedBudget.withinBudget) {
     throw new ApiRequestError(`The current script predicts ${Math.round(fittedBudget.predictedDurationMs / 1_000)} seconds of narration for a ${job.durationSeconds}-second target. Edit the script or adjust its duration before approval.`, 422, "narration_outside_budget");
   }
 
@@ -273,7 +275,11 @@ export async function fitProductionEditorialDraft(job: VideoJob, user: UserConte
     sourceBundle,
     editorialPlan: draft.editorialPlan,
     storyboard,
-    visualPlan,
+    visualPlan: visualPlan ? {
+      ...visualPlan,
+      narrationWordsPerSecond: pacing?.wordsPerSecond,
+      metrics: { ...visualPlan.metrics, predictedNarrationDurationMs: fittedBudget.predictedDurationMs },
+    } : undefined,
     script,
     timelineManifest: draft.timeline,
     qaReport,

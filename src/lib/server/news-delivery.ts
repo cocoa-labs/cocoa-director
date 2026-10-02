@@ -24,6 +24,7 @@ import type {
 import { timelineToSrt, timelineToVtt } from "@/lib/captions";
 import { narrationBudgetSummary } from "@/lib/hybrid-visuals";
 import { applyTimingPlan, compileEditorialTimingPlan } from "@/lib/editorial-timing";
+import { editorialNarrationTiming } from "@/lib/editorial-narration";
 import { validateTimeline } from "@/lib/production";
 import { fetchBlobUrl, uploadPublicBlob } from "@/lib/server/blob";
 import { getProviderMode, isEditorialTimingV2Enabled, isHybridVisualsV2Enabled, isLayeredEditorialCompositorEnabled, isSourceVisualsV2Enabled } from "@/lib/server/config";
@@ -115,14 +116,16 @@ export async function reconcileEditorialTiming(videoId: string) {
   });
   const timingPlan = compileEditorialTimingPlan({
     productionId: job.id,
+    scriptVersionId: scriptVersion,
     storyboard: job.storyboard,
     narration: measured,
     targetDurationMs: job.durationSeconds * 1_000,
     compiledAt: new Date().toISOString(),
   });
+  const narrationTiming = editorialNarrationTiming({ ...job, visualPlan: { ...job.visualPlan, timingPlan } });
+  const measuredPlan = { ...job.visualPlan, timingPlan, narrationWordsPerSecond: narrationTiming.pacing?.wordsPerSecond };
   if (!timingPlan.coverage.passed) {
-    const blockingFindings = timingPlan.coverage.findings.filter((finding) => finding.severity === "blocking");
-    const message = `Editorial timing requires script revision: ${blockingFindings.map((finding) => finding.message).join(" ")}`;
+    const message = narrationTiming.revisionMessage ?? "Recorded narration does not fit the selected duration. Fit the script to duration and review the new version.";
     const resetIds = new Set(["storyboard_approval", "imagery", "score", "generation", "visual_rough_cut_qa", "timeline", "preflight_qa", "render", "final_qa", "qa", "review"]);
     const workflowSteps = (job.workflowSteps ?? []).map((step): WorkflowStep => {
       if (step.id === "timing_reconciliation" || step.id === "script_approval") {
@@ -132,16 +135,16 @@ export async function reconcileEditorialTiming(videoId: string) {
       return step;
     });
     await store.updateJob(videoId, {
-      visualPlan: { ...job.visualPlan, timingPlan },
+      visualPlan: measuredPlan,
       approvals: (job.approvals ?? []).filter((approval) => approval.gate !== "script" && approval.gate !== "storyboard"),
       workflowSteps,
       status: "awaiting_user",
       error: message,
     });
     await heartbeatLatestRun(videoId, "awaiting_user", message);
-    return { requiresScriptRevision: true as const, timingPlan, storyboard: job.storyboard, visualPlan: { ...job.visualPlan, timingPlan } };
+    return { requiresScriptRevision: true as const, timingPlan, storyboard: job.storyboard, visualPlan: measuredPlan };
   }
-  const timed = applyTimingPlan(job.storyboard, job.visualPlan, timingPlan);
+  const timed = applyTimingPlan(job.storyboard, measuredPlan, timingPlan);
   const visualPlan = isSourceVisualsV2Enabled() && job.sourceBundle
     ? attachAuthenticSourceVisuals(timed.plan, job.sourceBundle)
     : timed.plan;

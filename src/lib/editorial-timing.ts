@@ -54,6 +54,7 @@ function boundedSeconds(value: number) {
 
 export function compileEditorialTimingPlan(input: {
   productionId: string;
+  scriptVersionId?: string;
   storyboard: NewsStoryboard;
   narration: MeasuredNarration[];
   targetDurationMs: number;
@@ -94,8 +95,8 @@ export function compileEditorialTimingPlan(input: {
   if (availablePauseMs > maximumPauseCapacity) findings.push({ code: "narration.underfill", severity: "blocking", message: `Supported narration leaves ${(availablePauseMs / 1_000).toFixed(1)} seconds unfilled. Shorten the selected duration or add sourced context and reapprove the script.` });
 
   const coverage = adjustedSpokenMs / input.targetDurationMs;
-  if (coverage < MIN_COVERAGE) findings.push({ code: "narration.coverage_low", severity: "blocking", message: `Predicted spoken coverage is ${(coverage * 100).toFixed(1)}%; narration-led output requires at least 75%.` });
-  if (coverage > MAX_COVERAGE) findings.push({ code: "narration.coverage_high", severity: "blocking", message: `Predicted spoken coverage is ${(coverage * 100).toFixed(1)}%; reserve brief transitions by condensing the script.` });
+  if (coverage < MIN_COVERAGE) findings.push({ code: "narration.coverage_low", severity: "blocking", message: `Measured spoken coverage is ${(coverage * 100).toFixed(1)}%; narration-led output requires at least 75%.` });
+  if (coverage > MAX_COVERAGE) findings.push({ code: "narration.coverage_high", severity: "blocking", message: `Measured spoken coverage is ${(coverage * 100).toFixed(1)}%; reserve brief transitions by condensing the script.` });
 
   const pauses: EditorialTimingPlan["pauses"] = [];
   const sceneTimings: EditorialTimingPlan["scenes"] = [];
@@ -141,7 +142,7 @@ export function compileEditorialTimingPlan(input: {
   };
   if (cursor !== input.targetDurationMs) report.findings.push({ code: "timeline.unallocated_duration", severity: "blocking", message: `${Math.abs(input.targetDurationMs - cursor)}ms cannot be allocated without exceeding the explicit pause policy.` });
   report.passed = report.findings.every((finding) => finding.severity !== "blocking") && cursor === input.targetDurationMs;
-  return { version: 2, productionId: input.productionId, targetDurationMs: input.targetDurationMs, scenes: sceneTimings, pauses, coverage: report, compiledAt: input.compiledAt };
+  return { version: 2, productionId: input.productionId, scriptVersionId: input.scriptVersionId, targetDurationMs: input.targetDurationMs, scenes: sceneTimings, pauses, coverage: report, compiledAt: input.compiledAt };
 }
 
 export function applyTimingPlan(storyboard: NewsStoryboard, plan: HybridVisualPlanV2, timing: EditorialTimingPlan) {

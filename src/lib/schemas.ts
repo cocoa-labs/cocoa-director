@@ -211,7 +211,8 @@ export const NarrationCoverageReport = z.object({
   version: z.literal(1),
   targetDurationMs: z.number().int().positive(),
   spokenDurationMs: z.number().int().nonnegative(),
-  spokenCoverage: z.number().min(0).max(1),
+  // Failed timing reports must retain overruns above 100%.
+  spokenCoverage: z.number().nonnegative(),
   longestUnapprovedGapMs: z.number().int().nonnegative(),
   passed: z.boolean(),
   findings: z.array(z.object({ code: z.string().min(1), severity: z.enum(["review", "blocking"]), message: z.string().min(1), sceneId: z.string().optional(), startMs: z.number().int().nonnegative().optional(), endMs: z.number().int().positive().optional() })).default([]),
@@ -241,6 +242,7 @@ export type SourceVisualReport = z.infer<typeof SourceVisualReport>;
 export const EditorialTimingPlan = z.object({
   version: z.literal(2),
   productionId: z.string().uuid(),
+  scriptVersionId: z.string().optional(),
   targetDurationMs: z.number().int().positive(),
   scenes: z.array(z.object({ sceneId: z.string().min(1), startMs: z.number().int().nonnegative(), speechStartMs: z.number().int().nonnegative(), speechEndMs: z.number().int().positive(), endMs: z.number().int().positive(), measuredNarrationMs: z.number().int().positive(), retimeRate: z.number().min(0.97).max(1.03), pauseAfterId: z.string().optional() })).min(1),
   pauses: z.array(EditorialPause).default([]),
@@ -401,6 +403,7 @@ export const HybridVisualPlanV2 = z.object({
   }).optional(),
   qualityReport: VisualQualityReport.optional(),
   timingPlan: EditorialTimingPlan.optional(),
+  narrationWordsPerSecond: z.number().positive().optional(),
 });
 export type HybridVisualPlanV2 = z.infer<typeof HybridVisualPlanV2>;
 export type HybridVisualPlanV3 = HybridVisualPlanV2 & { version: 3 };

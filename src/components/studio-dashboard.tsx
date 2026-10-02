@@ -1,5 +1,7 @@
 "use client";
 
+import { editorialNarrationTiming, editorialReviewStatus } from "@/lib/editorial-narration";
+
 import { upload } from "@vercel/blob/client";
 import Image from "next/image";
 import {
@@ -71,8 +73,7 @@ import {
   type SeedRole,
 } from "@/lib/seeds-payload";
 import { PROVIDER_CAPABILITIES } from "@/lib/provider-capabilities";
-import { detectBriefDurationSeconds, spokenScriptText } from "@/lib/editorial-timing";
-import { narrationBudgetSummary } from "@/lib/hybrid-visuals";
+import { detectBriefDurationSeconds } from "@/lib/editorial-timing";
 import { clearResolvedBackgroundError } from "@/lib/ui-errors";
 import type {
   AgentActionProposal,
@@ -756,7 +757,10 @@ export function StudioDashboard({
   const nextActionLabel = useMemo(() => nextLabel(job?.job), [job]);
   const currentPhase = currentJobPhase(job?.job);
   const currentStep = currentWorkflowStep(job?.job);
-  const visibleError = error ?? job?.error ?? currentStep?.error ?? currentPhase?.error ?? null;
+  const editorialTiming = job && (job.job.contentType === "news_digest" || job.job.contentType === "explainer")
+    ? editorialNarrationTiming(job.job)
+    : undefined;
+  const visibleError = error ?? editorialTiming?.revisionMessage ?? job?.error ?? currentStep?.error ?? currentPhase?.error ?? null;
   const selectedStyle = useMemo(
     () => STYLE_PRESETS.find((item) => item.id === stylePreset) ?? STYLE_PRESETS[0],
     [stylePreset],
@@ -2072,10 +2076,8 @@ export function StudioDashboard({
   const currentJob = job?.job;
   const currentProjectId = currentJob?.projectId ?? activeProjectId;
   const activeProject = projects.find((project) => project.id === currentProjectId) ?? projects[0] ?? null;
-  const editorialCoverage = currentJob && (currentJob.contentType === "news_digest" || currentJob.contentType === "explainer")
-    ? editorialNarrationSeconds(currentJob) / Math.max(1, currentJob.durationSeconds)
-    : undefined;
-  const editorialFitNeeded = editorialCoverage !== undefined && (editorialCoverage < 0.75 || editorialCoverage > 0.92);
+  const editorialCoverage = editorialTiming?.coverage;
+  const editorialFitNeeded = editorialTiming?.requiresRevision ?? false;
   const progress = jobProgressPercent(currentJob);
   const shotTotal = currentJob?.shotPlan?.shots.length ?? 0;
   const shotDone = currentJob?.generatedShots.length ?? 0;
@@ -2547,24 +2549,24 @@ export function StudioDashboard({
                     <div className="grid grid-cols-2 gap-2">
                       <button type="button" className="secondary-command" disabled={busy || draftScript.trim() === job.job.script} onClick={() => void saveNewsScript()}><Save className="h-4 w-4" /> Save version</button>
                       {editorialFitNeeded ? (
-                        <button type="button" className="primary-command" disabled={busy} onClick={() => void fitEditorialToDuration()}>
+                        <button type="button" className="primary-command" disabled={busy || draftScript.trim() !== job.job.script} onClick={() => void fitEditorialToDuration()}>
                           <Sparkles className="h-4 w-4" /> {editorialCoverage !== undefined && editorialCoverage > 0.92 ? "Condense to" : "Fit to"} {formatSeconds(job.job.durationSeconds)}
                         </button>
                       ) : (
-                        <button type="button" className="primary-command" disabled={busy} onClick={() => void approveNews("script")}><CheckCircle2 className="h-4 w-4" /> Approve script</button>
+                        <button type="button" className="primary-command" disabled={busy || draftScript.trim() !== job.job.script} onClick={() => void approveNews("script")}><CheckCircle2 className="h-4 w-4" /> Approve script</button>
                       )}
                     </div>
                     <div className="rounded-lg border border-border bg-black/10 p-3 text-xs">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-muted">Predicted narration</span>
-                        <span className="font-mono text-foreground">{formatSeconds(Math.ceil(editorialNarrationSeconds(job.job)))} / {formatSeconds(job.job.durationSeconds)}</span>
+                        <span className="text-muted">{editorialTiming?.measured ? "Measured narration" : editorialTiming?.pacing ? "Estimated narration (calibrated)" : "Estimated narration"}</span>
+                        <span className="font-mono text-foreground">{formatSeconds(Math.ceil((editorialTiming?.durationMs ?? 0) / 1_000))} / {formatSeconds(job.job.durationSeconds)}</span>
                       </div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/8">
-                        <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, editorialNarrationSeconds(job.job) / job.job.durationSeconds * 100)}%` }} />
+                        <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, (editorialCoverage ?? 0) * 100)}%` }} />
                       </div>
-                      <div className="mt-2 text-[10px] leading-4 text-muted">Includes the voice-specific pause and transition reserve. Material overruns must return to script review.</div>
-                      <div className={`mt-1 font-mono text-[10px] ${editorialNarrationSeconds(job.job) / job.job.durationSeconds >= 0.75 && editorialNarrationSeconds(job.job) / job.job.durationSeconds <= 0.92 ? "text-accent" : "text-amber-300"}`}>
-                        {Math.round(editorialNarrationSeconds(job.job) / job.job.durationSeconds * 100)}% predicted spoken coverage · required 75–92%
+                      <div className="mt-2 text-[10px] leading-4 text-muted">{editorialTiming?.measured ? "Measured from the recorded narration. Fit the script if the audio leaves too little or too much room for transitions." : "Estimated from the saved script. The recorded audio is checked before visuals and rendering begin."}</div>
+                      <div className={`mt-1 font-mono text-[10px] ${!editorialFitNeeded ? "text-accent" : "text-amber-300"}`}>
+                        {Math.round((editorialCoverage ?? 0) * 100)}% {editorialTiming?.measured ? "measured" : "estimated"} spoken coverage · required {Math.round((editorialTiming?.budget.minimumCoverage ?? 0.75) * 100)}–92%
                       </div>
                       {editorialFitNeeded ? (
                         <div className="mt-2 text-[11px] leading-4 text-foreground">
@@ -4813,7 +4815,11 @@ function DirectorOutputCard({ output }: { output: DirectorOutput }) {
 
 function TopPipeline({ current, currentJob, progress }: { current: number; currentJob?: VideoJob; progress?: ProductionProgressSnapshot }) {
   const records = progress ? progressRecords(progress) : pipelineRecords(currentJob);
-  const activeIndex = Math.max(0, records.findIndex((record, index) => (
+  // Editorial workflows use named steps; their legacy music phase stays at 1.
+  const editorialActive = currentJob && ["explainer", "news_digest"].includes(currentJob.contentType ?? "")
+    ? records.findIndex((record) => record.state === "running" || record.state === "awaiting_user" || record.state === "failed")
+    : -1;
+  const activeIndex = Math.max(0, editorialActive >= 0 ? editorialActive : records.findIndex((record, index) => (
     record.state === "running" || record.state === "awaiting_user" || record.state === "failed" || current === index + 1
   )));
   const activeRecord = records[activeIndex] ?? records[0];
@@ -8760,12 +8766,6 @@ function durationRangeFor(contentType: ContentType) {
   return { min: 30, max: 300 };
 }
 
-function editorialNarrationSeconds(job: VideoJob) {
-  const narration = job.script
-    ? spokenScriptText(job.script, job.editorialPlan?.scenes.map((scene) => scene.title) ?? [])
-    : job.storyboard?.scenes.map((scene) => scene.narration).join(" ") ?? "";
-  return narrationBudgetSummary(narration, job.durationSeconds).predictedDurationMs / 1_000;
-}
 
 function isProductionId(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -8796,6 +8796,8 @@ function outputSummary(job?: VideoJob) {
       detail: "Start with Stage for a cheap treatment gate or Make Video for full autopilot.",
     };
   }
+  const editorialReview = editorialReviewStatus(job);
+  if (editorialReview) return { icon: <Clock3 className="h-10 w-10 text-accent-2" aria-hidden />, ...editorialReview };
   if (job.finalVideoUrl) {
     return {
       icon: <PlayCircle className="h-4 w-4 text-accent" aria-hidden />,

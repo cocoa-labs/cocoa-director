@@ -26,3 +26,9 @@ Music-video planning, providers, prompts, timing and rendering files are unchang
 - Evidence cards were rendered and inspected at 1280×720, 720×1280 and 1080×1080. Mock export exercised the real FFmpeg compositor.
 
 Provider responses in automated drafting tests are mocked. No paid narration, image or video generation, live database migration, deployment or public release was performed by these checks.
+
+## Narration timing recovery
+
+Before speech is recorded, the approval screen labels its word-count timing as an estimate. Once narration is available, the screen uses the measured audio for that saved script. An overrun pauses the production and offers **Condense to duration**; an underfilled recording offers **Fit to duration**. The recovery writer uses the recorded voice pace and reserves room for scene transitions.
+
+Refresh an already-paused production to reveal the recovery action; its sources do not need to be imported again. Review the revised script and storyboard before approving generation. Revised scripts receive new version IDs, so recordings from older versions cannot be reused accidentally. Music-video behavior is unchanged.

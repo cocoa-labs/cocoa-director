@@ -1,3 +1,4 @@
+import { editorialNarrationTiming } from "@/lib/editorial-narration";
 import { criticalSection } from "@/lib/server/critical-section";
 import { ApiRequestError } from "@/lib/server/api-error";
 import { randomUUID } from "node:crypto";
@@ -102,10 +103,16 @@ export async function updateNewsDraft(input: {
   const synchronizedStoryboard = input.script !== undefined && job.storyboard
     ? storyboardForEditedScript(input.script, input.storyboard ?? job.storyboard)
     : input.storyboard;
+  const pacing = editorialNarrationTiming(job).pacing;
   const visualPlan = input.visualPlan ? applyValidatedLikenessRouting(
     recalculateHybridVisualPlan(input.visualPlan),
     isCinematicReenactmentsEnabled() && isLikenessVideoEnabled() && isLikenessLiveValidated(),
-  ) : input.script !== undefined && job.visualPlan ? { ...job.visualPlan, timingPlan: undefined, metrics: { ...job.visualPlan.metrics, predictedNarrationDurationMs: narrationBudgetSummary(spokenScriptText(input.script, job.storyboard?.scenes.map((scene) => scene.title) ?? []), job.durationSeconds).predictedDurationMs } } : undefined;
+  ) : input.script !== undefined && job.visualPlan ? {
+    ...job.visualPlan,
+    timingPlan: undefined,
+    narrationWordsPerSecond: pacing?.wordsPerSecond,
+    metrics: { ...job.visualPlan.metrics, predictedNarrationDurationMs: narrationBudgetSummary(spokenScriptText(input.script, job.storyboard?.scenes.map((scene) => scene.title) ?? []), job.durationSeconds, pacing).predictedDurationMs },
+  } : undefined;
   if (synchronizedStoryboard !== undefined || visualPlan !== undefined || input.visualStylePreset !== undefined) {
     const nextStoryboard = synchronizedStoryboard ?? job.storyboard;
     storyboardVersionId = randomUUID();
@@ -165,14 +172,15 @@ function scriptBlockers(job: VideoJob) {
   // The versioned script is the approval artifact and therefore the authoritative
   // input for this gate. Storyboard narration is rebuilt from the fitted script before
   // the storyboard gate and must not make a corrected script appear permanently stale.
-  const narration = job.script
-    ? spokenScriptText(job.script, job.editorialPlan?.scenes.map((scene) => scene.title) ?? [])
-    : job.storyboard?.scenes.map((scene) => scene.narration).join(" ") ?? "";
-  const budget = narrationBudgetSummary(narration, job.durationSeconds);
-  if (!budget.withinBudget) {
+  const timing = editorialNarrationTiming(job);
+  const budget = timing.budget;
+  if (timing.measured && timing.requiresRevision) {
+    blockers.push("Recorded narration does not fit the selected duration. Fit the script to duration and review the new version before approval.");
+  }
+  if (!timing.measured && !budget.withinBudget) {
     blockers.push(`Narration is ${budget.words} words; the ${job.durationSeconds}-second voice budget is ${budget.budgetWords}. Condense the script before approval.`);
   }
-  if (budget.predictedCoverage < 0.75) blockers.push(`Predicted spoken coverage is ${Math.round(budget.predictedCoverage * 100)}%; add sourced context or shorten the selected duration before approval.`);
+  if (!timing.measured && budget.words < budget.minimumWords) blockers.push(`Estimated spoken coverage is ${Math.round(budget.predictedCoverage * 100)}%; add sourced context or shorten the selected duration before approval.`);
   if (job.contentType !== "news_digest" && job.contentType !== "explainer") return blockers;
   const claims = new Map((job.sourceBundle?.claims ?? []).map((claim) => [claim.id, claim]));
   const narratedClaimIds = new Set(

@@ -46,25 +46,32 @@ const PRESETS = {
   },
 } as const;
 
-export function narrationWordBudget(targetDurationSeconds: number) {
-  return Math.max(20, Math.floor(targetDurationSeconds * WORDS_PER_SECOND * (1 - NARRATION_RESERVE)));
+export type NarrationPacing = { wordsPerSecond: number; sceneCount?: number };
+
+export function narrationWordBudget(targetDurationSeconds: number, wordsPerSecond = WORDS_PER_SECOND) {
+  return Math.max(20, Math.floor(targetDurationSeconds * wordsPerSecond * (1 - NARRATION_RESERVE)));
 }
 
-export function predictedNarrationDurationMs(text: string) {
-  return Math.max(1_000, Math.round(wordCount(text) / WORDS_PER_SECOND * 1_000));
+export function predictedNarrationDurationMs(text: string, wordsPerSecond = WORDS_PER_SECOND) {
+  return Math.max(1_000, Math.round(wordCount(text) / wordsPerSecond * 1_000));
 }
 
-export function narrationBudgetSummary(text: string, targetDurationSeconds: number) {
+export function narrationBudgetSummary(text: string, targetDurationSeconds: number, pacing?: NarrationPacing) {
+  const wordsPerSecond = pacing?.wordsPerSecond ?? WORDS_PER_SECOND;
   const words = wordCount(text.replace(/\[claim:[^\]]+\]/g, ""));
-  const budgetWords = narrationWordBudget(targetDurationSeconds);
+  const budgetWords = narrationWordBudget(targetDurationSeconds, wordsPerSecond);
+  const minimumSeconds = Math.max(targetDurationSeconds * 0.75, pacing?.sceneCount ? targetDurationSeconds - pacing.sceneCount * 1.5 : 0);
+  const predictedDurationMs = predictedNarrationDurationMs(text.replace(/\[claim:[^\]]+\]/g, ""), wordsPerSecond);
   return {
     words,
     budgetWords,
-    predictedDurationMs: predictedNarrationDurationMs(text.replace(/\[claim:[^\]]+\]/g, "")),
+    wordsPerSecond,
+    predictedDurationMs,
     targetDurationMs: targetDurationSeconds * 1_000,
     withinBudget: words <= budgetWords,
-    minimumWords: Math.ceil(targetDurationSeconds * WORDS_PER_SECOND * 0.75),
-    predictedCoverage: Math.min(1, predictedNarrationDurationMs(text.replace(/\[claim:[^\]]+\]/g, "")) / (targetDurationSeconds * 1_000)),
+    minimumWords: Math.ceil(minimumSeconds * wordsPerSecond),
+    minimumCoverage: minimumSeconds / targetDurationSeconds,
+    predictedCoverage: predictedDurationMs / (targetDurationSeconds * 1_000),
   };
 }
 
