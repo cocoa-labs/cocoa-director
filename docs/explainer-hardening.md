@@ -51,6 +51,12 @@ A failed visual remains recoverable while visual QA has not started. Approved pr
 
 Regression coverage includes the 117-word initial narration estimate, completed timing recovery, the exhausted 200-cent allowance with 195 cents already committed, a blocked top-up at the daily cap, recovery through the render allowance, and browser checks for fitting and pending-QA recovery. Paid provider output is not established by these mocked tests. Music-video behavior is unchanged.
 
+## Recorded narration fit
+
+Measured editorial audio can now use a pitch-preserving pace adjustment between 0.92× and 1.08× to reach the nearest valid speech window. The planner, saved schema, renderer, and delivery checks share these bounds. Coverage and 1.5-second transition limits remain enforced, and larger mismatches still require a source-grounded script revision. Integer scene durations are allocated cumulatively to avoid rounding failures at the coverage boundaries.
+
+For previously paused productions, Fit recording retains the script version, citations, and recorded assets instead of issuing another writer or voice request. Reapproving the same storyboard reuses its existing generation allowance. New versions, increased estimates, and provider attempts still go through the spending guards. Regression coverage includes the observed 47,917 ms and 57,856 ms recordings, both pacing boundaries, unchanged stored media, and recovery near the daily cap. Music-video orchestration is unchanged.
+
 ## Draft image recovery
 
 Recovery recognizes failed images as well as failed video clips. It rejects stale or successful selections before changing the allowance or workflow state, retains approved artifacts and measured narration, and resumes the existing waiting workflow when available. Image retries receive distinct attempt keys while completed images remain untouched.

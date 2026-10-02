@@ -2543,7 +2543,7 @@ export function StudioDashboard({
                 </div>
 
                 {visibleError ? <ErrorDetail>{visibleError}</ErrorDetail> : null}
-                {fittingEditorial ? <div role="status" className="status-card text-sm text-accent"><Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> Fitting the script to duration. The revised script will appear here for review.</div> : null}
+                {fittingEditorial ? <div role="status" className="status-card text-sm text-accent"><Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> {editorialTiming?.canFitRecording ? "Fitting the saved recording. Your script and voice take will be retained." : "Fitting the script to duration. The revised script will appear here for review."}</div> : null}
                 {productionProgress?.recoverable && productionProgress.units.some((unit) => (unit.kind === "image" || unit.kind === "video") && (unit.state === "failed" || unit.state === "needs_attention")) ? (
                   <div className="status-card space-y-2 text-sm">
                     <p>Your approved script and completed visuals are saved.</p>
@@ -2571,7 +2571,7 @@ export function StudioDashboard({
                       <button type="button" className="secondary-command" disabled={busy || draftScript.trim() === job.job.script} onClick={() => void saveNewsScript()}><Save className="h-4 w-4" /> Save version</button>
                       {editorialFitNeeded ? (
                         <button type="button" className="primary-command" disabled={busy || draftScript.trim() !== job.job.script} onClick={() => void fitEditorialToDuration()}>
-                          {fittingEditorial ? <><Loader2 className="h-4 w-4 animate-spin" /> Fitting script...</> : <><Sparkles className="h-4 w-4" /> {editorialCoverage !== undefined && editorialCoverage > 0.92 ? "Condense to" : "Fit to"} {formatSeconds(job.job.durationSeconds)}</>}
+                          {fittingEditorial ? <><Loader2 className="h-4 w-4 animate-spin" /> {editorialTiming?.canFitRecording ? "Fitting recording..." : "Fitting script..."}</> : <><Sparkles className="h-4 w-4" /> {editorialTiming?.canFitRecording ? "Fit recording to" : editorialCoverage !== undefined && editorialCoverage > 0.92 ? "Condense to" : "Fit to"} {formatSeconds(job.job.durationSeconds)}</>}
                         </button>
                       ) : (
                         <button type="button" className="primary-command" disabled={busy || editorialScriptApproved || draftScript.trim() !== job.job.script} onClick={() => void approveNews("script")}><CheckCircle2 className="h-4 w-4" /> {editorialScriptApproved ? "Script approved" : "Approve script"}</button>
@@ -2579,19 +2579,19 @@ export function StudioDashboard({
                     </div>
                     <div className="rounded-lg border border-border bg-black/10 p-3 text-xs">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-muted">{editorialTiming?.measured ? "Measured narration" : editorialTiming?.pacing ? "Estimated narration (calibrated)" : "Estimated narration"}</span>
+                        <span className="text-muted">{editorialTiming?.measured ? editorialTiming.retimeRate !== 1 ? "Fitted narration" : "Measured narration" : editorialTiming?.pacing ? "Estimated narration (calibrated)" : "Estimated narration"}</span>
                         <span className="font-mono text-foreground">{formatSeconds(Math.ceil((editorialTiming?.durationMs ?? 0) / 1_000))} / {formatSeconds(job.job.durationSeconds)}</span>
                       </div>
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/8">
                         <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, (editorialCoverage ?? 0) * 100)}%` }} />
                       </div>
-                      <div className="mt-2 text-[10px] leading-4 text-muted">{editorialTiming?.measured ? "Measured from the recorded narration. Fit the script if the audio leaves too little or too much room for transitions." : "Estimated from the saved script. The recorded audio is checked before visuals and rendering begin."}</div>
+                      <div className="mt-2 text-[10px] leading-4 text-muted">{editorialTiming?.measured ? editorialTiming.retimeRate !== 1 ? `Recorded ${(editorialTiming.recordedDurationMs / 1_000).toFixed(1)} seconds; playback at ${editorialTiming.retimeRate.toFixed(3)}× pace with pitch preserved.` : "Measured from the recorded narration. Fit to duration if the audio leaves too little or too much room for transitions." : "Estimated from the saved script. The recorded audio is checked before visuals and rendering begin."}</div>
                       <div className={`mt-1 font-mono text-[10px] ${!editorialFitNeeded ? "text-accent" : "text-amber-300"}`}>
                         {Math.round((editorialCoverage ?? 0) * 100)}% {editorialTiming?.measured ? "measured" : "estimated"} spoken coverage · required {Math.round((editorialTiming?.budget.minimumCoverage ?? 0.75) * 100)}–92%
                       </div>
                       {editorialFitNeeded ? (
                         <div className="mt-2 text-[11px] leading-4 text-foreground">
-                          Director can revise this draft from the attached evidence, preserve its citations, and create a new exact version for your review.
+                          {editorialTiming?.canFitRecording ? "Fit the saved voice take without rewriting or generating narration again. Script and citations stay unchanged." : "Director can revise this draft from the attached evidence, preserve its citations, and create a new exact version for your review."}
                         </div>
                       ) : null}
                     </div>

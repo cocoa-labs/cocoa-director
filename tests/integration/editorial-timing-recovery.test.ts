@@ -9,6 +9,7 @@ import { approveNewsGate, updateNewsDraft } from "@/lib/server/news-editorial";
 import { fitProductionEditorialDraft } from "@/lib/server/productions";
 import { getStore, resetInMemoryStoreForDev } from "@/lib/server/store";
 import { buildSourceFirstDraft } from "@/workflow/source-first";
+import * as editorialAi from "@/lib/server/news-editorial-ai";
 
 const user = { id: "timing-regression", email: "timing@example.com", planTier: "dev" as const, dailyBudgetCents: 10_000 };
 const scriptVersion = "51000000-0000-4000-8000-000000000001";
@@ -21,7 +22,33 @@ describe("measured editorial timing recovery", () => {
     vi.stubEnv("EDITORIAL_TIMING_V2_ENABLED", "true");
     resetInMemoryStoreForDev();
   });
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it("recovers a saved timing-only miss without changing versions or regenerating audio", async () => {
+    const draft = await fixture();
+    await addMeasurements(draft, [7_669, 9_000, 12_000, 8_261, 13_791, 7_135]);
+    await reconcileEditorialTiming(draft.id);
+    const measured = (await getStore().getJob(draft.id))!;
+    const paused = await getStore().updateJob(draft.id, {
+      status: "awaiting_user", approvals: [], error: "Legacy timing policy rejected this recording.",
+      visualPlan: { ...measured.visualPlan!, timingPlan: { ...measured.visualPlan!.timingPlan!, coverage: { ...measured.visualPlan!.timingPlan!.coverage, passed: false, spokenDurationMs: 57_856, spokenCoverage: 0.9643 } } },
+      workflowSteps: measured.workflowSteps!.map((step) => ["script_approval", "timing_reconciliation"].includes(step.id) ? { ...step, state: "awaiting_user", error: "Timing revision needed" } : step),
+    });
+    expect(editorialNarrationTiming(paused).canFitRecording).toBe(true);
+    expect(editorialReviewStatus(paused)?.title).toBe("Timing adjustment needed");
+    const writer = vi.spyOn(editorialAi, "fitNewsEditorialOutline");
+    const beforeMedia = await getStore().listJobMedia(draft.id);
+    const fitted = await fitProductionEditorialDraft(paused, user);
+    expect(writer).not.toHaveBeenCalled();
+    expect(fitted.script).toBe(paused.script);
+    expect(fitted.artifactVersions).toEqual(paused.artifactVersions);
+    expect(fitted.approvals).toEqual([]);
+    expect(fitted.visualPlan?.timingPlan?.coverage).toMatchObject({ passed: true, spokenDurationMs: 55_200 });
+    expect(fitted.visualPlan?.timingPlan?.scenes[0].retimeRate).toBeCloseTo(57_856 / 55_200);
+    expect(fitted.error).toBeUndefined();
+    expect(await getStore().listJobMedia(draft.id)).toEqual(beforeMedia);
+    await expect(approveNewsGate({ job: fitted, user, gate: "script", artifactVersionId: scriptVersion })).resolves.toBeDefined();
+  });
 
   it("recovers the 62-second narration without reapproving or reusing its old audio", async () => {
     const draft = await fixture();

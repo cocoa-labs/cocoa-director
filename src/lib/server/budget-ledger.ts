@@ -152,7 +152,14 @@ export async function reserveBudget(input: {
         // including conservative reservations whose final charge is not known.
         const committed = values.filter((item) => item.metadata.parentId === root.id)
           .reduce((sum, item) => sum + Math.max(item.reservedCents, item.actualCents), 0);
-        root.reservedCents = Math.max(root.reservedCents, committed + input.estimatedCostCents);
+        // Timing-only recovery continues the same storyboard's generation
+        // allowance; its reusable narration must not be reserved a second time.
+        const existingEditorialAllowance = !wasSettled && input.scope === "video_action_guard:approve_editorial_storyboard_and_generate" &&
+          typeof input.metadata?.artifactVersionId === "string" && values.some((item) =>
+            item.userId === input.user.id && item.scope === input.scope && item.metadata.parentId === root.id && item.metadata.actionOnly === true &&
+            item.metadata.artifactVersionId === input.metadata?.artifactVersionId &&
+            typeof item.metadata.maximumAuthorizedCents === "number" && item.metadata.maximumAuthorizedCents >= input.estimatedCostCents);
+        if (!existingEditorialAllowance) root.reservedCents = Math.max(root.reservedCents, committed + input.estimatedCostCents);
       } else if (wasSettled || /(?:^|[:_])(?:regenerat(?:e|ion)|recover(?:y)?|edit|polish)(?:_|$)/.test(input.scope)) root.reservedCents += input.estimatedCostCents;
       else root.reservedCents = Math.max(root.reservedCents, input.estimatedCostCents);
     }

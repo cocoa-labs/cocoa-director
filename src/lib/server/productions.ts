@@ -223,6 +223,21 @@ export async function fitProductionEditorialDraft(job: VideoJob, user: UserConte
   if (!job.sourceBundle || !job.editorialPlan || !job.storyboard) {
     throw new Error("Create the sourced editorial draft before fitting its narration.");
   }
+  // A saved take may fit under the current bounded pacing policy. Reconcile the
+  // actual assets first; preserve script/version identity and avoid another LLM
+  // rewrite and voice charge when only playback timing needs adjustment.
+  if (isEditorialTimingV2Enabled() && editorialNarrationTiming(job).measured) {
+    const { reconcileEditorialTiming } = await import("@/lib/server/news-delivery");
+    const result = await reconcileEditorialTiming(job.id);
+    if (!result.requiresScriptRevision) {
+      return getStore().updateJob(job.id, {
+        error: undefined,
+        workflowSteps: (job.workflowSteps ?? []).map((step) => step.id === "timing_reconciliation"
+          ? { ...step, state: "complete" as const, error: undefined, completedAt: new Date().toISOString() }
+          : ["script_approval", "storyboard_approval"].includes(step.id) ? { ...step, error: undefined } : step),
+      });
+    }
+  }
   const now = new Date().toISOString();
   const request = ProductionCreateRequest.parse({
     contentType: job.contentType,

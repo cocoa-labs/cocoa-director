@@ -15,11 +15,13 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
     if (auth.response) return auth.response;
     if (!idempotencyKeyFromRequest(request)) return NextResponse.json({ error: "Missing Idempotency-Key header" }, { status: 400 });
     const job = await withJobContext(id, () => fitProductionEditorialDraft(auth.job, auth.user));
+    const recordingRetained = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId === auth.job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId;
     return NextResponse.json({
       productionId: job.id,
       job,
       fitted: true,
-      invalidated: ["approvals", "storyboard", "narration", "generation", "timeline", "render"],
+      recordingRetained,
+      invalidated: recordingRetained ? [] : ["approvals", "storyboard", "narration", "generation", "timeline", "render"],
     });
   } catch (error) {
     if (error instanceof Response) return error;

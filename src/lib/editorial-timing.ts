@@ -5,13 +5,13 @@ import type {
   NewsStoryboard,
   VisualBeat,
 } from "@/lib/schemas";
+import { MAX_EDITORIAL_NARRATION_RATE, MIN_EDITORIAL_NARRATION_RATE } from "@/lib/editorial-pacing";
 
 const MIN_COVERAGE = 0.75;
 const MAX_COVERAGE = 0.92;
 const DEFAULT_PAUSE_MS = 600;
 const CHAPTER_PAUSE_MS = 1_100;
 const MAX_PAUSE_MS = 1_500;
-const MAX_RETIME_DELTA = 0.03;
 const MIN_VISUAL_BEAT_MS = 2_000;
 const MAX_VISUAL_BEAT_MS = 6_000;
 const MAX_FULL_SCREEN_INFORMATION_MS = 3_000;
@@ -65,15 +65,25 @@ export function compileEditorialTimingPlan(input: {
   if (missing.length > 0) throw new Error(`Measured narration is missing for ${missing.map((scene) => scene.id).join(", ")}.`);
 
   const spokenDurationMs = input.storyboard.scenes.reduce((sum, scene) => sum + (narrationByScene.get(scene.id) ?? 0), 0);
-  const rawCoverage = spokenDurationMs / input.targetDurationMs;
-  const retimeRate = rawCoverage > MAX_COVERAGE && rawCoverage <= MAX_COVERAGE * (1 + MAX_RETIME_DELTA)
-    ? rawCoverage / MAX_COVERAGE
-    : 1;
-  if (retimeRate > 1 + MAX_RETIME_DELTA) throw new Error("Narration exceeds the selected duration by more than the permitted 3% retiming range. Revise and reapprove the script.");
-
-  const adjustedDurations = input.storyboard.scenes.map((scene) => Math.round((narrationByScene.get(scene.id) ?? 0) / retimeRate));
-  const adjustedSpokenMs = adjustedDurations.reduce((sum, duration) => sum + duration, 0);
   const sceneCount = input.storyboard.scenes.length;
+  const minimumSpokenMs = Math.ceil(Math.max(input.targetDurationMs * MIN_COVERAGE, input.targetDurationMs - sceneCount * MAX_PAUSE_MS));
+  const maximumSpokenMs = Math.floor(input.targetDurationMs * MAX_COVERAGE);
+  const fittedSpokenMs = Math.min(maximumSpokenMs, Math.max(minimumSpokenMs, spokenDurationMs));
+  const candidateRate = spokenDurationMs / Math.max(1, fittedSpokenMs);
+  const retimeRate = minimumSpokenMs <= maximumSpokenMs && candidateRate >= MIN_EDITORIAL_NARRATION_RATE && candidateRate <= MAX_EDITORIAL_NARRATION_RATE
+    ? candidateRate : 1;
+  // Allocate integer milliseconds cumulatively. Independent scene rounding can
+  // push an otherwise valid take just outside the coverage or pause boundary.
+  let measuredCursor = 0;
+  let adjustedCursor = 0;
+  const adjustedDurations = input.storyboard.scenes.map((scene) => {
+    measuredCursor += narrationByScene.get(scene.id) ?? 0;
+    const endMs = Math.round(measuredCursor / retimeRate);
+    const durationMs = endMs - adjustedCursor;
+    adjustedCursor = endMs;
+    return durationMs;
+  });
+  const adjustedSpokenMs = adjustedDurations.reduce((sum, duration) => sum + duration, 0);
   const availablePauseMs = input.targetDurationMs - adjustedSpokenMs;
   const maximumPauseCapacity = sceneCount * MAX_PAUSE_MS;
   const findings: NarrationCoverageReport["findings"] = [];

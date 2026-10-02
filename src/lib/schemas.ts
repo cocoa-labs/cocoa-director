@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { DEV_BLOB_URL_PREFIX } from "@/lib/constants";
+import { MAX_EDITORIAL_NARRATION_RATE, MIN_EDITORIAL_NARRATION_RATE } from "@/lib/editorial-pacing";
 
 // Media URLs may be absolute (https://, blob:, data:, …) in production (Vercel
 // Blob) or root-relative /dev-blob/… paths in local dev (no Vercel Blob). Both
@@ -244,7 +245,7 @@ export const EditorialTimingPlan = z.object({
   productionId: z.string().uuid(),
   scriptVersionId: z.string().optional(),
   targetDurationMs: z.number().int().positive(),
-  scenes: z.array(z.object({ sceneId: z.string().min(1), startMs: z.number().int().nonnegative(), speechStartMs: z.number().int().nonnegative(), speechEndMs: z.number().int().positive(), endMs: z.number().int().positive(), measuredNarrationMs: z.number().int().positive(), retimeRate: z.number().min(0.97).max(1.03), pauseAfterId: z.string().optional() })).min(1),
+  scenes: z.array(z.object({ sceneId: z.string().min(1), startMs: z.number().int().nonnegative(), speechStartMs: z.number().int().nonnegative(), speechEndMs: z.number().int().positive(), endMs: z.number().int().positive(), measuredNarrationMs: z.number().int().positive(), retimeRate: z.number().min(MIN_EDITORIAL_NARRATION_RATE).max(MAX_EDITORIAL_NARRATION_RATE), pauseAfterId: z.string().optional() })).min(1),
   pauses: z.array(EditorialPause).default([]),
   coverage: NarrationCoverageReport,
   compiledAt: z.string(),

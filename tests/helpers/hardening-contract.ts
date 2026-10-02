@@ -170,6 +170,28 @@ export function hardeningContract() {
       expect((await productionBudgetSnapshot(job.id))?.remainingCents).toBe(56);
     });
 
+    it("keeps the same storyboard's allowance through timing recovery while charging new versions and attempts", async () => {
+      const owner = user();
+      process.env.DAILY_BUDGET_CAP_USD_GLOBAL = "50";
+      await reserveBudget({ user: owner, scope: "other-work", estimatedCostCents: 3600 });
+      const job = await getStore().createJob(VideoCreateRequest.parse({ prompt: "A saved editorial storyboard with narration that only needs retiming.", durationSeconds: 60 }), owner);
+      await reserveBudget({ user: owner, scope: "create", videoJobId: job.id, estimatedCostCents: 200 });
+      process.env.PROVIDER_MODE = "live";
+      await reserveProviderAttempt({ videoId: job.id, scope: "saved-draft", costCents: 160 });
+      const version = randomUUID();
+      const approval = { user: owner, scope: "video_action_guard:approve_editorial_storyboard_and_generate", videoJobId: job.id,
+        estimatedCostCents: 1206, allowanceMode: "remaining" as const, metadata: { artifactVersionId: version, maximumAuthorizedCents: 1206 } };
+      await reserveBudget({ ...approval, key: randomUUID() });
+      await reserveProviderAttempt({ videoId: job.id, scope: "recorded-narration", costCents: 37 });
+      await reserveBudget({ ...approval, key: randomUUID() });
+      expect(await productionBudgetSnapshot(job.id)).toEqual({ authorizedCents: 1366, committedCents: 197, remainingCents: 1169 });
+      expect((await budgetSnapshot()).reservedTodayCents).toBe(4966);
+      await expect(reserveBudget({ ...approval, key: randomUUID(), metadata: { ...approval.metadata, artifactVersionId: randomUUID() } })).rejects.toMatchObject({ code: "global_spend_cap_reached" });
+      await expect(reserveBudget({ ...approval, key: randomUUID(), estimatedCostCents: 1210 })).rejects.toMatchObject({ code: "global_spend_cap_reached" });
+      await expect(reserveProviderAttempt({ videoId: job.id, scope: "too-much-generation", costCents: 1170 })).rejects.toMatchObject({ code: "production_budget_exhausted" });
+      expect((await productionBudgetSnapshot(job.id))?.authorizedCents).toBe(1366);
+    });
+
     it("tops up an exhausted editorial recovery through render and still enforces the daily cap", async () => {
       const owner = user();
       const job = await getStore().createJob(VideoCreateRequest.parse({ prompt: "Three saved visuals and one budget-blocked image.", durationSeconds: 60 }), owner);

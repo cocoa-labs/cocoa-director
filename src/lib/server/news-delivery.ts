@@ -24,6 +24,7 @@ import type {
 import { timelineToSrt, timelineToVtt } from "@/lib/captions";
 import { narrationBudgetSummary, DEFAULT_NARRATION_WORDS_PER_SECOND } from "@/lib/hybrid-visuals";
 import { applyTimingPlan, compileEditorialTimingPlan } from "@/lib/editorial-timing";
+import { MAX_EDITORIAL_NARRATION_RATE, MIN_EDITORIAL_NARRATION_RATE } from "@/lib/editorial-pacing";
 import { editorialNarrationTiming } from "@/lib/editorial-narration";
 import { validateTimeline } from "@/lib/production";
 import { fetchBlobUrl, uploadPublicBlob } from "@/lib/server/blob";
@@ -578,7 +579,7 @@ export function compileEditorialTimeline(
       usableInMs: 0,
       usableOutMs: actualDurationMs,
       hold: false,
-      provenance: { origin: "generated", creator: "ElevenLabs", permittedUse: "Generated narration for this production", acquiredAt: new Date().toISOString(), transformations: actualDurationMs > targetDurationMs ? ["bounded tempo normalization", "loudness normalization"] : ["loudness normalization"], c2paValidated: false },
+      provenance: { origin: "generated", creator: "ElevenLabs", permittedUse: "Generated narration for this production", acquiredAt: new Date().toISOString(), transformations: actualDurationMs !== targetDurationMs ? ["bounded tempo normalization", "loudness normalization"] : ["loudness normalization"], c2paValidated: false },
       metadata: { sceneId: scene.id, measuredSpeechStartMs: timing?.speechStartMs ?? scene.startMs, measuredSpeechEndMs: timing?.speechEndMs ?? scene.endMs, pauseAfterId: timing?.pauseAfterId },
     });
     const timingScale = targetDurationMs / Math.max(1, actualDurationMs);
@@ -844,7 +845,9 @@ async function renderEditorialAssets(videoId: string, job: VideoJob, beats: Rend
     const timing = job.visualPlan?.timingPlan?.scenes.find((candidate) => candidate.sceneId === sceneId);
     const targetSeconds = timing ? (timing.speechEndMs - timing.speechStartMs) / 1_000 : scene.targetDurationMs / 1_000;
     const actualSeconds = scene.narration.durationMs / 1_000;
-    const tempo = Math.max(0.97, Math.min(1.03, actualSeconds / Math.max(0.001, targetSeconds)));
+    const tempo = timing
+      ? Math.max(MIN_EDITORIAL_NARRATION_RATE, Math.min(MAX_EDITORIAL_NARRATION_RATE, actualSeconds / Math.max(0.001, targetSeconds)))
+      : Math.max(0.97, Math.min(1.03, actualSeconds / Math.max(0.001, targetSeconds)));
     const delayMs = timing?.speechStartMs ?? job.storyboard?.scenes[index]?.startMs ?? 0;
     filters.push(`[${narrationStartIndex + index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${actualSeconds.toFixed(6)},atempo=${tempo.toFixed(6)},adelay=${delayMs}|${delayMs},asetpts=PTS-STARTPTS[n${index}]`);
   });
@@ -1123,7 +1126,8 @@ export function assertNarrationFits(job: VideoJob, assets: SceneAsset[]) {
   if (timing.measured && timing.requiresRevision) throw new Error(timing.revisionMessage);
   if (!timing.measured && !budget.withinBudget) throw new Error(`Narration duration budget failed: ${budget.words} words exceed the ${budget.budgetWords}-word target. Revise and reapprove the script.`);
   assets.forEach((asset, index) => {
-    if (asset.narration.durationMs > asset.targetDurationMs * MAX_NARRATION_OVERRUN) {
+    const maximumRate = timing.measured ? MAX_EDITORIAL_NARRATION_RATE : MAX_NARRATION_OVERRUN;
+    if (asset.narration.durationMs > asset.targetDurationMs * maximumRate + 1) {
       throw new Error(`Narration duration for scene ${index + 1} is ${(asset.narration.durationMs / 1_000).toFixed(1)}s for a ${(asset.targetDurationMs / 1_000).toFixed(1)}s slot. Revise and reapprove the script; Cocoa will not truncate narration.`);
     }
   });

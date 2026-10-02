@@ -2,11 +2,38 @@ import { describe, expect, it } from "vitest";
 
 import { applyTimingPlan, compileEditorialTimingPlan, detectBriefDurationSeconds, normalizeEditorialVisualBeats } from "@/lib/editorial-timing";
 import { buildHybridVisualPlan } from "@/lib/hybrid-visuals";
-import { NewsStoryboard, ProductionCreateRequest } from "@/lib/schemas";
+import { EditorialTimingPlan, NewsStoryboard, ProductionCreateRequest } from "@/lib/schemas";
 
 const productionId = "51000000-0000-4000-8000-000000000005";
 
 describe("editorial timing V2", () => {
+  it.each([
+    { totalMs: 47_917, targetSpeechMs: 51_000 },
+    { totalMs: 57_856, targetSpeechMs: 55_200 },
+    { totalMs: 46_920, targetSpeechMs: 51_000 },
+    { totalMs: 59_616, targetSpeechMs: 55_200 },
+  ])("fits a $totalMs ms take without rewriting or leaving rounding gaps", ({ totalMs, targetSpeechMs }) => {
+    const storyboard = fixtureStoryboard();
+    const timing = compileEditorialTimingPlan({ productionId, storyboard,
+      narration: storyboard.scenes.map((scene, index) => ({ sceneId: scene.id, durationMs: Math.floor(totalMs / 6) + (index < totalMs % 6 ? 1 : 0) })),
+      targetDurationMs: 60_000, compiledAt: "2026-10-02T00:00:00.000Z" });
+    expect(EditorialTimingPlan.parse(timing).coverage.passed).toBe(true);
+    expect(timing.coverage.spokenDurationMs).toBe(targetSpeechMs);
+    expect(timing.scenes.at(-1)?.endMs).toBe(60_000);
+    expect(timing.scenes.every((scene) => scene.retimeRate >= 0.92 && scene.retimeRate <= 1.08)).toBe(true);
+    expect(timing.pauses.every((pause) => pause.durationMs <= 1_500)).toBe(true);
+    expect(timing.scenes.reduce((sum, scene) => sum + scene.measuredNarrationMs, 0)).toBe(totalMs);
+  });
+
+  it.each([42_000, 62_035])("still blocks a $totalMs ms take outside the pacing limit", (totalMs) => {
+    const storyboard = fixtureStoryboard();
+    const timing = compileEditorialTimingPlan({ productionId, storyboard,
+      narration: storyboard.scenes.map((scene, index) => ({ sceneId: scene.id, durationMs: Math.floor(totalMs / 6) + (index < totalMs % 6 ? 1 : 0) })),
+      targetDurationMs: 60_000, compiledAt: "2026-10-02T00:00:00.000Z" });
+    expect(timing.coverage.passed).toBe(false);
+    expect(timing.scenes.every((scene) => scene.retimeRate === 1)).toBe(true);
+  });
+
   it("keeps the selected duration authoritative while detecting brief hints", () => {
     expect(detectBriefDurationSeconds("Create a short 60-second explainer.")).toBe(60);
     expect(detectBriefDurationSeconds("Make this 1:30 with a calm close.")).toBe(90);
