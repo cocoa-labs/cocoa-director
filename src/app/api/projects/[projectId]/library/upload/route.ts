@@ -15,6 +15,16 @@ import { getStore } from "@/lib/server/store";
 
 export const runtime = "nodejs";
 
+export async function GET(request: Request, context: RouteContext<"/api/projects/[projectId]/library/upload">) {
+  try {
+    const user = await getUserContext(request);
+    const { projectId } = await context.params;
+    const project = await getStore().getProject(projectId);
+    if (!project || project.userId !== user.id) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    return NextResponse.json({ clientUpload: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
+  } catch (error) { return apiErrorResponse(error, "Upload configuration unavailable"); }
+}
+
 export async function POST(request: Request, context: RouteContext<"/api/projects/[projectId]/library/upload">) {
   try {
     const user = await getUserContext(request);

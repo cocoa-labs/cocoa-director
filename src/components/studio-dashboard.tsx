@@ -1728,46 +1728,40 @@ export function StudioDashboard({
     }
   }
 
-  // Upload a project file via Vercel Blob client-upload, falling back to a direct server
-  // upload when there's no Blob token (local dev) — see /library/upload-direct.
+  // Choose the supported transport before sending the file. Local demo uploads
+  // should not require an intentional failed Blob token request.
   async function uploadProjectFile(
     projectId: string,
     file: File,
     payload: { kind: MediaKind; name: string; role: string; tags: string[] },
   ) {
-    try {
+    const readinessResponse = await fetch(`/api/projects/${projectId}/library/upload`);
+    const readiness = await readApiJson<{ clientUpload?: boolean; error?: string }>(readinessResponse);
+    if (!readinessResponse.ok) throw new Error(readiness.error ?? "Upload configuration unavailable");
+    if (readiness.clientUpload) {
       const blob = await upload(file.name, file, {
         access: "public",
         handleUploadUrl: `/api/projects/${projectId}/library/upload`,
         clientPayload: JSON.stringify({ projectId, ...payload }),
         multipart: file.size > 5 * 1024 * 1024,
       });
-      // Blob completion is asynchronous. Keep the upload pending until the signed
-      // callback registers the asset, otherwise the first refresh shows an empty vault.
       for (let attempt = 0; attempt < 30; attempt++) {
         const project = await refreshProjectData(projectId);
         if (project.libraryAssets?.some((asset) => asset.url === blob.url)) return;
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
       throw new Error("The file was uploaded, but registration is still pending. Reopen this project in a moment to refresh the library.");
-    } catch (error) {
-      // No Blob token (local dev) → the client token can't be minted. Fall back to a direct
-      // server upload that writes to /dev-blob/. Production has a token, so this never runs.
-      if (!/client token/i.test(error instanceof Error ? error.message : "")) throw error;
-      const form = new FormData();
-      form.set("file", file);
-      form.set("kind", payload.kind);
-      form.set("name", payload.name);
-      form.set("role", payload.role);
-      form.set("tags", JSON.stringify(payload.tags));
-      const res = await fetch(`/api/projects/${projectId}/library/upload-direct`, {
-        method: "POST",
-        body: form,
-      });
-      if (!res.ok) {
-        const detail = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(detail?.error || "Upload failed");
-      }
+    }
+    const form = new FormData();
+    form.set("file", file);
+    form.set("kind", payload.kind);
+    form.set("name", payload.name);
+    form.set("role", payload.role);
+    form.set("tags", JSON.stringify(payload.tags));
+    const response = await fetch(`/api/projects/${projectId}/library/upload-direct`, { method: "POST", body: form });
+    if (!response.ok) {
+      const detail = await readApiJson<{ error?: string }>(response);
+      throw new Error(detail.error || "Upload failed");
     }
   }
 

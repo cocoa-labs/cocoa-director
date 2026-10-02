@@ -75,7 +75,8 @@ test("standalone image, video and music versions, restore and file export", asyn
       const restored = page.waitForResponse((response) => response.url().endsWith("/restore"));
       await page.getByRole("button", { name: "Restore", exact: true }).last().click();
       expect((await restored).ok()).toBe(true);
-      await expect(page.locator(".session-meta-row").getByText("2 versions", { exact: true })).toBeVisible();
+      await expect(page.locator(".session-meta-row").getByText("3 versions", { exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Session versions" }).getByText("image iteration", { exact: true })).toHaveCount(2);
     }
   }
   expect(errors).toEqual([]);
@@ -106,7 +107,7 @@ test("narrow layout, keyboard navigation, upload, library curation and error rec
   await expect(page.getByRole("button", { name: "Demo pack", exact: true })).toBeVisible();
   await page.getByLabel("Media URL", { exact: true }).fill("http://127.0.0.1/private.png");
   await page.getByRole("button", { name: "Import", exact: true }).click();
-  await expect(page.getByText(/public.*(URL|network)|private.*(network|address)|not allowed|not permitted|blocked/i).first()).toBeVisible();
+  await expect(page.getByText(/public.*(URL|network)|private.*(network|address)|internal address|not allowed|not permitted|blocked/i).first()).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(2);
   await page.screenshot({ path: info.outputPath("library-narrow.png"), fullPage: true });
 });
@@ -122,14 +123,18 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   await page.getByPlaceholder("Text source title (optional)").fill("Garden report");
   await page.locator("#source-text").fill(Array.from({ length: 16 }, (_, i) => `Report item ${i + 1}: the fictional neighborhood garden recorded more volunteer visits and additional plant beds this season. These are synthetic demonstration notes.`).join(" "));
   await page.getByRole("button", { name: "Add text source", exact: true }).click();
+  await page.getByRole("tablist", { name: "Production workbench" }).getByRole("tab", { name: /Sources/ }).click();
   await expect(page.getByText("Garden report", { exact: true }).first()).toBeVisible();
   await page.locator('input[type="file"][accept="application/pdf,.pdf"]').setInputFiles({ name: "garden.pdf", mimeType: "application/pdf", buffer: demoPdf() });
-  await expect(page.getByText("garden.pdf", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "Include garden in this draft", exact: true })).toBeChecked();
   await page.getByRole("button", { name: "Continue to direction", exact: true }).click();
   await page.getByRole("slider", { name: "Duration", exact: true }).focus(); await page.keyboard.press("Home");
   await page.getByLabel("Quality tier", { exact: true }).selectOption("draft");
   await page.getByRole("button", { name: "Continue to review", exact: true }).click();
   await page.getByRole("button", { name: /^Create Draft/ }).click();
+  await expect(page.getByRole("button", { name: /^(Approve script|Condense to|Fit to)/ })).toBeVisible();
+  const fit = page.getByRole("button", { name: /^(Condense to|Fit to)/ });
+  if (await fit.isVisible()) await fit.click();
   await page.getByRole("button", { name: "Approve script", exact: true }).click();
   await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
   const id = new URL(page.url()).searchParams.get("production")!;
