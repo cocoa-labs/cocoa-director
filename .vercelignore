@@ -1,0 +1,7 @@
+.env*
+.cocoa-private
+public/dev-blob
+node_modules
+.git
+.next
+coverage

@@ -1,0 +1,42 @@
+name: Validate
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cocoa_test
+          POSTGRES_PASSWORD: cocoa-ci-test-only
+          POSTGRES_DB: cocoa_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U cocoa_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PROVIDER_MODE: mock
+      TEST_DATABASE_URL: postgresql://cocoa_test:cocoa-ci-test-only@localhost:5432/cocoa_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run media:setup
+      - run: npm audit --audit-level=high
+      - run: npm run check
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: browser-failure-evidence
+          path: test-results/

@@ -1,0 +1,9 @@
+{
+  "crons": [
+    {
+      "path": "/api/maintenance/cleanup",
+      "schedule": "15 8 * * *"
+    }
+  ],
+  "installCommand": "npm ci"
+}
