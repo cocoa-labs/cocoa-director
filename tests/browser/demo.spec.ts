@@ -113,7 +113,9 @@ test("narrow layout, keyboard navigation, upload, library curation and error rec
 });
 
 test("editorial text and PDF sources, versioned approvals, captions and citations", async ({ page }, info) => {
-  test.setTimeout(240_000);
+  // A cold Linux development build compiles the durable workflow steps on demand.
+  // Leave time for those compilations as well as the bounded FFmpeg render and QA.
+  test.setTimeout(420_000);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("/");
@@ -140,7 +142,7 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
   expect((await approved).ok()).toBe(true);
   const id = new URL(page.url()).searchParams.get("production")!;
-  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`)).json()).state, { timeout: 150_000 }).toBe("complete");
+  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`)).json()).state, { timeout: 300_000 }).toBe("complete");
   const output = await (await page.request.get(`/api/productions/${id}`)).json();
   expect(output.job.approvals.length).toBeGreaterThanOrEqual(2);
   for (const key of ["srt", "vtt", "sourceManifestJson", "claimLedger"]) {
