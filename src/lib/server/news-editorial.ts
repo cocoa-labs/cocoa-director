@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import type { HybridVisualPlanV2, NewsStoryboard, SourceClaim, VideoJob, VisualStylePreset, WorkflowStep } from "@/lib/schemas";
 import { validateTimeline } from "@/lib/production";
+import { spokenScriptText } from "@/lib/editorial-timing";
 import { applyValidatedLikenessRouting, narrationBudgetSummary, recalculateHybridVisualPlan } from "@/lib/hybrid-visuals";
 import type { UserContext } from "@/lib/server/auth";
 import { isCinematicReenactmentsEnabled, isHybridSafeRecoveryEnabled, isHybridVisualsV2Enabled, isHybridWorkflowV4Enabled, isLikenessLiveValidated, isLikenessVideoEnabled } from "@/lib/server/config";
@@ -193,15 +194,6 @@ function scriptBlockers(job: VideoJob) {
   }
   if (narratedClaimIds.size === 0) blockers.push("The cited script does not contain any claim markers.");
   return blockers;
-}
-
-function spokenScriptText(script: string, sceneTitles: string[]) {
-  const titles = new Set(sceneTitles.map((title) => title.trim().toLowerCase()));
-  return script
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter((line) => line && !titles.has(line.toLowerCase()))
-    .join(" ");
 }
 
 function storyboardBlockers(job: VideoJob) {

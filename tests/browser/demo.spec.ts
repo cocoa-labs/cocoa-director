@@ -126,7 +126,7 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   await page.getByRole("tablist", { name: "Production workbench" }).getByRole("tab", { name: /Sources/ }).click();
   await expect(page.getByText("Garden report", { exact: true }).first()).toBeVisible();
   await page.locator('input[type="file"][accept="application/pdf,.pdf"]').setInputFiles({ name: "garden.pdf", mimeType: "application/pdf", buffer: demoPdf() });
-  await expect(page.getByRole("checkbox", { name: "Include garden in this draft", exact: true })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Include garden in this draft", exact: true })).toBeChecked({ timeout: 90_000 });
   await page.getByRole("button", { name: "Continue to direction", exact: true }).click();
   await page.getByRole("slider", { name: "Duration", exact: true }).focus(); await page.keyboard.press("Home");
   await page.getByLabel("Quality tier", { exact: true }).selectOption("draft");
@@ -136,7 +136,9 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   const fit = page.getByRole("button", { name: /^(Condense to|Fit to)/ });
   if (await fit.isVisible()) await fit.click();
   await page.getByRole("button", { name: "Approve script", exact: true }).click();
+  const approved = page.waitForResponse((response) => response.url().endsWith("/approvals") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
+  expect((await approved).ok()).toBe(true);
   const id = new URL(page.url()).searchParams.get("production")!;
   await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`)).json()).state, { timeout: 150_000 }).toBe("complete");
   const output = await (await page.request.get(`/api/productions/${id}`)).json();

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { mediaToolsSource } from "@/lib/server/media-tools";
+import { mediaToolsSource, prepareSandboxMediaTools } from "@/lib/server/media-tools";
 import { Sandbox } from "@vercel/sandbox";
 
 import type { MediaProbeMetadata, QAReport, RenderManifest } from "@/lib/schemas";
@@ -122,6 +122,7 @@ async function runRenderAttempt(
   });
 
   try {
+    await prepareSandboxMediaTools(sandbox);
     await sandbox.mkDir(SANDBOX_WORKDIR);
     await sandbox.writeFiles([
       { path: `${SANDBOX_WORKDIR}/media-tools.mjs`, content: await mediaToolsSource() },

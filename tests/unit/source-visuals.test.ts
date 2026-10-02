@@ -20,6 +20,11 @@ describe("authentic editorial source visuals", () => {
     expect(evidenceBeat?.sourceVisual).toMatchObject({ kind: "url_excerpt_card", domain: "example.com", excerptHash: exactExcerptHash(excerpt), locator: "Deployment" });
     expect(evidenceBeat?.graphicSpec && "version" in evidenceBeat.graphicSpec ? evidenceBeat.graphicSpec.version : undefined).toBe(2);
     expect(evidenceBeat ? validateGraphicPayload(evidenceBeat) : undefined).toEqual({ valid: true });
+    const draft = buildHybridVisualPlan({ productionId: initial.productionId, request: { ...request, qualityTier: "draft" }, storyboard, createdAt: initial.createdAt })!;
+    expect(draft.beats.every((beat) => !beat.fullScreen || beat.endMs - beat.startMs <= 3_000)).toBe(true);
+    const sourcedDraft = attachAuthenticSourceVisuals(draft, bundle);
+    expect(sourcedDraft.beats.some((beat) => beat.sourceVisual && beat.endMs - beat.startMs === 5_000)).toBe(true);
+    expect(sourcedDraft.beats.every((beat) => !beat.fullScreen || beat.endMs - beat.startMs <= 3_000)).toBe(true);
   });
 
   it("rejects decorative quantitative graphics without cited units", () => {

@@ -34,8 +34,10 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "sharp": "^0.35.3",
+    "tar-stream": "3.2.1",
     "undici": "^6.28.0",
     "workflow": "^4.7.0",
+    "xz-decompress": "0.2.3",
     "zod": "4.5.4"
   },
   "devDependencies": {
@@ -44,6 +46,7 @@
     "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/tar-stream": "^3.1.5",
     "eslint": "^9.39.5",
     "eslint-config-next": "16.3.8",
     "tailwindcss": "^4",
@@ -65,6 +68,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/keef75/cocoa-director.git"
+    "url": "https://github.com/cocoa-labs/cocoa-director.git"
   }
 }

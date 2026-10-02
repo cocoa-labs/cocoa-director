@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { stripTypeScriptTypes } from "node:module";
+import type { Sandbox } from "@vercel/sandbox";
 
 // Retained month-end build. No floating "latest" URLs or nonfree codec builds.
 export const MEDIA_TOOLS_RELEASE = {
@@ -15,6 +16,12 @@ export const MEDIA_TOOLS_RELEASE = {
 } as const;
 export type MediaTools = { ffmpeg: string; ffprobe: string };
 let installing: Promise<MediaTools> | undefined;
+
+/** The Node 24 Sandbox image includes tar but omits its XZ decompressor. */
+export async function prepareSandboxMediaTools(sandbox: Pick<Sandbox, "runCommand">) {
+  const result = await sandbox.runCommand({ cmd: "dnf", args: ["install", "--assumeyes", "xz"], sudo: true, timeoutMs: 60_000 });
+  if (result.exitCode !== 0) throw new Error(`Sandbox media prerequisites failed: ${(await result.stderr()).slice(-1_000)}`);
+}
 
 async function executable(path: string) {
   try { await access(path, constants.X_OK); return true; } catch { return false; }
@@ -45,20 +52,25 @@ export async function mediaTools(): Promise<MediaTools> {
   if (found) return found;
   // Vercel Functions have no system FFmpeg. Cache the pinned tools in ephemeral
   // storage instead of including hundreds of megabytes in every function bundle.
-  if (process.env.VERCEL === "1") return installMediaTools();
+  if (process.env.VERCEL === "1") {
+    const { extractMediaArchive } = await import("./media-archive");
+    return installMediaTools((archive, destination) => extractMediaArchive(archive, destination, MEDIA_TOOLS_RELEASE.directory));
+  }
   throw new Error("FFmpeg and ffprobe are required. Install FFmpeg or run npm run media:setup on Linux x64. See docs/setup.md.");
 }
 
-export async function installMediaTools(): Promise<MediaTools> {
+type ArchiveExtractor = (archive: string, destination: string) => Promise<void>;
+
+export async function installMediaTools(extractArchive?: ArchiveExtractor): Promise<MediaTools> {
   if (process.platform !== "linux" || process.arch !== "x64") {
     throw new Error("Automatic media installation supports Linux x64. Install system FFmpeg on macOS or other architectures; see docs/setup.md.");
   }
   if (installing) return installing;
-  installing = install().catch((error) => { installing = undefined; throw error; });
+  installing = install(extractArchive).catch((error) => { installing = undefined; throw error; });
   return installing;
 }
 
-async function install(): Promise<MediaTools> {
+async function install(extractArchive?: ArchiveExtractor): Promise<MediaTools> {
   const destination = join(tmpdir(), `cocoa-tools-${MEDIA_TOOLS_RELEASE.sha256.slice(0, 16)}`);
   const result = { ffmpeg: join(destination, "bin", "ffmpeg"), ffprobe: join(destination, "bin", "ffprobe") };
   if (await executable(result.ffmpeg) && await executable(result.ffprobe)) return result;
@@ -79,7 +91,8 @@ async function install(): Promise<MediaTools> {
     const archivePath = join(staging, "tools.tar.xz");
     await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 });
     const extracted = join(staging, "extracted"); await mkdir(extracted);
-    await mediaCommand("tar", ["-xJf", archivePath, "-C", extracted, "--strip-components=1",
+    if (extractArchive) await extractArchive(archivePath, extracted);
+    else await mediaCommand("tar", ["-xJf", archivePath, "-C", extracted, "--strip-components=1",
       `${MEDIA_TOOLS_RELEASE.directory}/bin/ffmpeg`, `${MEDIA_TOOLS_RELEASE.directory}/bin/ffprobe`]);
     for (const name of ["ffmpeg", "ffprobe"]) await chmod(join(extracted, "bin", name), 0o755);
     const version = await mediaCommand(join(extracted, "bin", "ffmpeg"), ["-version"]);

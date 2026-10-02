@@ -9,6 +9,7 @@ The MIT license applies to original Cocoa Director source, not to independently 
 | Sharp's platform-specific libvips libraries | LGPL-3.0-or-later and bundled-library notices; installed separately by npm, not relicensed under MIT |
 | Lightning CSS and axe-core | MPL-2.0; preserve the upstream file licenses and applicable source availability when redistributing |
 | `@vercel/cli-auth` | npm metadata omits the license; the declared [Vercel source repository](https://github.com/vercel/vercel/blob/main/LICENSE) supplies Apache-2.0 |
+| xz-decompress and tar-stream | MIT; portable extraction of the verified FFmpeg archive in Vercel Functions |
 | FFmpeg command-line tools | GPL or LGPL according to the build; independent upstream executable, not relicensed under MIT |
 | Liberation fonts included by PDF.js | GPL-2.0 with the upstream font embedding exception; [complete notice](docs/licenses/LIBERATION.txt) |
 | Foxit standard fonts included by PDF.js | Upstream permission and copyright notice; [complete notice](docs/licenses/FOXIT.txt) |

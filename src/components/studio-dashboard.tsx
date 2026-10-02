@@ -71,7 +71,8 @@ import {
   type SeedRole,
 } from "@/lib/seeds-payload";
 import { PROVIDER_CAPABILITIES } from "@/lib/provider-capabilities";
-import { detectBriefDurationSeconds } from "@/lib/editorial-timing";
+import { detectBriefDurationSeconds, spokenScriptText } from "@/lib/editorial-timing";
+import { narrationBudgetSummary } from "@/lib/hybrid-visuals";
 import { clearResolvedBackgroundError } from "@/lib/ui-errors";
 import type {
   AgentActionProposal,
@@ -3527,7 +3528,7 @@ function StudioWorkspace({
               <h3>Your studio</h3>
               <p>Cocoa Director is an unsupported open-source release. Your projects, keys, provider accounts, and deployment belong to you. Fork the repository to customize or maintain your copy.</p>
             </div>
-            <a href="https://github.com/keef75/cocoa-director" target="_blank" rel="noreferrer" className="secondary-command">Setup and source code</a>
+            <a href="https://github.com/cocoa-labs/cocoa-director" target="_blank" rel="noreferrer" className="secondary-command">Setup and source code</a>
           </section>
           <section className="workspace-card">
             <div className="workspace-card-heading">
@@ -8760,9 +8761,10 @@ function durationRangeFor(contentType: ContentType) {
 }
 
 function editorialNarrationSeconds(job: VideoJob) {
-  const narration = job.script ?? job.storyboard?.scenes.map((scene) => scene.narration).join(" ") ?? "";
-  const words = narration.replace(/\[claim:[^\]]+\]/g, "").trim().split(/\s+/).filter(Boolean).length;
-  return words / 2.35;
+  const narration = job.script
+    ? spokenScriptText(job.script, job.editorialPlan?.scenes.map((scene) => scene.title) ?? [])
+    : job.storyboard?.scenes.map((scene) => scene.narration).join(" ") ?? "";
+  return narrationBudgetSummary(narration, job.durationSeconds).predictedDurationMs / 1_000;
 }
 
 function isProductionId(value: string) {

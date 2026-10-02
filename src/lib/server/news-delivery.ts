@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { mediaTools, mediaToolsSource } from "@/lib/server/media-tools";
+import { mediaTools, mediaToolsSource, prepareSandboxMediaTools } from "@/lib/server/media-tools";
 import { Sandbox } from "@vercel/sandbox";
 import sharp from "sharp";
 
@@ -875,6 +875,7 @@ async function renderInSandbox(args: string[], files: Array<{ name: string; cont
   await reserveProviderAttempt({ scope: "vercel:editorial-render", costCents: 50 });
   const sandbox = await Sandbox.create({ ...credentials, runtime: "node24", timeout: 1000 * 60 * 12, resources: { vcpus: 2 } });
   try {
+    await prepareSandboxMediaTools(sandbox);
     await sandbox.mkDir(workdir);
     await sandbox.mkDir(`${workdir}/fonts`);
     await sandbox.writeFiles([

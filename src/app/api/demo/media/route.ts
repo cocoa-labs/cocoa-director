@@ -7,7 +7,12 @@ export const maxDuration = 180;
 export async function GET(request: Request) {
   try {
     await getUserContext(request);
-    const { body, contentType } = await demoMedia(request.url);
+    const { body, contentType } = await demoMedia(request.url).catch((error: unknown) => {
+      // Only synthetic, bounded media operations run here. Keep executable diagnostics
+      // in operator logs; the API response still uses the sanitized error contract.
+      console.error(JSON.stringify({ event: "demo_media_failed", diagnostic: error instanceof Error ? error.message.slice(0,1000) : "unknown_media_error" }));
+      throw error;
+    });
     const headers = new Headers({ "Content-Type": contentType, "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" });
     const range = request.headers.get("range");
     if (range) {

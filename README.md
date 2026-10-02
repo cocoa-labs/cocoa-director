@@ -2,9 +2,9 @@
 
 **Turn a creative brief into a music video.** Plan the treatment, compose the soundtrack, direct the shots, and assemble the final film in one studio. Or build a source-backed editorial video, work on an image, explore music, and collect the results in your library.
 
-[![Cocoa Director](public/cocoa-preview.png)](https://github.com/keef75/cocoa-director/releases/tag/v0.1.0)
+[![Cocoa Director](public/cocoa-preview.png)](https://github.com/cocoa-labs/cocoa-director/releases/tag/v0.1.0)
 
-[Watch “Let It Fly,” made with Cocoa Director](https://github.com/keef75/cocoa-director/releases/download/v0.1.0/let-it-fly.mp4) · [Release and verification](https://github.com/keef75/cocoa-director/releases/tag/v0.1.0) · [Live setup](docs/setup.md) · [Architecture](docs/architecture.md)
+[Watch “Let It Fly,” made with Cocoa Director](https://github.com/cocoa-labs/cocoa-director/releases/download/v0.1.0/let-it-fly.mp4) · [Release and verification](https://github.com/cocoa-labs/cocoa-director/releases/tag/v0.1.0) · [Live setup](docs/setup.md) · [Architecture](docs/architecture.md)
 
 > **An archived, unsupported release.** This is a complete source handoff for you to fork and make your own. There is no hosted service, support inbox, promised maintenance, or future update schedule. Your installation uses your accounts, keys, infrastructure, and budget. The original creator's studio and data are not included.
 
@@ -13,7 +13,7 @@
 You need **Node 24**, npm 11, and **FFmpeg with ffprobe**. On macOS, install FFmpeg with `brew install ffmpeg-full`. On Linux x64, `npm run media:setup` installs the verified tool build after npm dependencies are installed. [Other installation details](docs/setup.md#media-tools).
 
 ```sh
-git clone https://github.com/keef75/cocoa-director.git
+git clone https://github.com/cocoa-labs/cocoa-director.git
 cd cocoa-director
 npm ci
 npm run setup -- --mode=demo
@@ -67,7 +67,7 @@ npm run check       # lint, types, unit/integration tests, production build
 npm run test:e2e    # browser workflows; see docs/development.md
 ```
 
-[Development and tests](docs/development.md) · [Configuration and troubleshooting](docs/setup.md) · [API and data model](docs/architecture.md) · [Security and maintenance](SECURITY.md)
+[Release verification](docs/release-verification.md) · [Development and tests](docs/development.md) · [Configuration and troubleshooting](docs/setup.md) · [API and data model](docs/architecture.md) · [Security and maintenance](SECURITY.md)
 
 Fork this repository to make changes. The archived upstream does not accept issues or pull requests. Maintain your own fork, upgrade dependencies, and revalidate providers before using it for production work.
 

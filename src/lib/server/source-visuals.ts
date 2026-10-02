@@ -45,7 +45,8 @@ export function attachAuthenticSourceVisuals(plan: HybridVisualPlanV2, sourceBun
     const graphicSpec = beat.kind === "data_visualization"
       ? quantitativeGraphicSpec(evidence.excerpt, beat.evidenceIds, sourceVisual.title, sourceExcerptSpec.overlayPlacement) ?? sourceExcerptSpec
       : sourceExcerptSpec;
-    return { ...beat, sourceVisual, graphicSpec, fullScreen: graphicSpec.family === "source_excerpt" && beat.kind !== "composite" };
+    const fullScreenLimit = sourceVisual.kind === "pdf_page" || sourceVisual.kind === "pdf_highlight_crop" ? 4_000 : 3_000;
+    return { ...beat, sourceVisual, graphicSpec, fullScreen: graphicSpec.family === "source_excerpt" && beat.kind !== "composite" && beat.endMs - beat.startMs <= fullScreenLimit };
   });
   return { ...plan, version: 4, beats };
 }

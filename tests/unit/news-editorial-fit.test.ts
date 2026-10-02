@@ -1,10 +1,24 @@
 import { describe, expect, it } from "vitest";
 
 import { narrationBudgetSummary } from "@/lib/hybrid-visuals";
+import { spokenScriptText } from "@/lib/editorial-timing";
 import { SourceBundle } from "@/lib/schemas";
 import { fitOutlineToNarrationBudget } from "@/lib/server/news-editorial-ai";
 
 describe("source-grounded editorial fit", () => {
+  it("does not let scene headings and citation markers block a fitted script", () => {
+    const narration = Array.from({ length: 60 }, () => "word").join(" ");
+    const title = "An unusually long chapter heading containing fifteen extra unspoken words for this regression example";
+    const script = `${title}\n${narration} [claim:source-1]`;
+    expect(narrationBudgetSummary(script, 30).withinBudget).toBe(false);
+    const spoken = spokenScriptText(script, [title.toUpperCase()]);
+    const budget = narrationBudgetSummary(spoken, 30);
+    expect(budget.words).toBe(60);
+    expect(budget.withinBudget).toBe(true);
+    expect(budget.predictedCoverage).toBeGreaterThanOrEqual(0.75);
+    expect(spoken).toContain("[claim:source-1]");
+  });
+
   it("expands an underfilled outline from cited evidence into the approval range", () => {
     const sourceBundle = SourceBundle.parse({
       inputs: [{ id: "source-1", kind: "text", title: "Technical report", text: "Supplied report text." }],

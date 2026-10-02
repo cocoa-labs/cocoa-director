@@ -37,9 +37,9 @@ All live installations need durable Postgres and public asset storage for reliab
 
 ### Vercel deployment
 
-Create your own Vercel project from your fork. Choose Node 24, install with `npm ci`, and build with `npm run build`. Do not connect your fork to somebody else's existing project. Supply live variables separately for Preview and Production, including independent databases and Blob stores. Run migration against each intended database explicitly before use.
+Create your own Vercel project from your fork. Choose the **Next.js framework preset** and Node 24, install with `npm ci`, and build with `npm run build`. Do not connect your fork to somebody else's existing project. Supply live variables separately for Preview and Production, including independent databases and Blob stores. Run migration against each intended database explicitly before use.
 
-The Workflow SDK integrates through the Next.js configuration. Rendering runs in Sandbox with runtime `node24`; deployed Sandbox authentication uses Vercel OIDC. Optional local Sandbox access requires all of `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. These are server secrets, not browser settings. Confirm current hosting/Workflow/Sandbox limits and billing in your own account.
+The Workflow SDK integrates through the Next.js configuration. Rendering runs in Sandbox with runtime `node24`; its setup installs the signed distribution `xz` package using `dnf` before unpacking the pinned FFmpeg archive. Vercel Functions use a bounded JavaScript archive reader. Deployed Sandbox authentication uses Vercel OIDC. Optional local Sandbox access requires all of `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. These are server secrets, not browser settings. Confirm current hosting/Workflow/Sandbox limits and billing in your own account.
 
 Direct large uploads use Blob's browser upload protocol. `/api/projects/:id/library/upload` and `/api/projects/:id/sources/upload` issue authenticated, scoped tokens. `/api/uploads/library/completed` and `/api/uploads/sources/completed` receive SDK-signature-verified callbacks. If Deployment Protection blocks callbacks, configure the supported callback access for your test deployment; do not remove signature or ownership checks. Test both stores before relying on large uploads.
 

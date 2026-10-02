@@ -293,7 +293,7 @@ function buildSceneBeats(input: {
       graphicSpec,
       sourceVisual: undefined,
       motionCues: buildMotionCues(endMs - startMs),
-      fullScreen: isInformationKind(kind),
+      fullScreen: isInformationKind(kind) && endMs - startMs <= 3_000,
       reusePolicy: { mode: "unique", approved: false, minimumSeparationMs: 30_000 },
     };
   });

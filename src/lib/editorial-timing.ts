@@ -24,6 +24,13 @@ export type MeasuredNarration = {
   durationMs: number;
 };
 
+/** Scene headings are presentation metadata, not words the narrator speaks. */
+export function spokenScriptText(script: string, sceneTitles: string[]) {
+  const titles = new Set(sceneTitles.map((title) => title.trim().toLowerCase()));
+  return script.split(/\n+/).map((line) => line.trim())
+    .filter((line) => line && !titles.has(line.toLowerCase())).join(" ");
+}
+
 export function detectBriefDurationSeconds(brief: string): number | undefined {
   const normalized = brief.toLowerCase().replace(/[–—]/g, "-");
   const clock = normalized.match(/\b(\d{1,2}):(\d{2})\b/);
