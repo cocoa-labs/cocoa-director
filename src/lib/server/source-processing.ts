@@ -9,6 +9,7 @@ import type { PDFPageProxy } from "pdfjs-dist/types/src/display/api";
 
 import type { ProductionSource, SourceBundle, SourceFragment, SourceInput } from "@/lib/schemas";
 import { editorialModel } from "@/lib/model-routing";
+import { extractArticle } from "@/lib/server/article-extraction";
 import { getProviderMode } from "@/lib/server/config";
 import { readPrivateSource } from "@/lib/server/source-blob";
 import { fetchGuarded } from "@/lib/server/ssrf";
@@ -143,43 +144,19 @@ async function processPdfSource(source: ProductionSource) {
 async function processUrlSource(source: ProductionSource) {
   if (!source.url) throw new Error("URL source is missing its URL.");
   const retrievedAt = new Date().toISOString();
-  const response = await fetchGuarded(source.url, {
-    maxRedirects: 4,
-    timeoutMs: 15_000,
-    maxBytes: MAX_SOURCE_BYTES,
-  });
-  if (!response.ok) {
-    if (isPublisherAccessRestricted(response.status)) {
-      const store = getStore();
-      await store.replaceSourceFragments(source.id, []);
-      return store.updateProductionSource(source.id, {
-        retrievedAt,
-        processingState: "warning",
-        warnings: [RESEARCH_LEAD_WARNING],
-        error: undefined,
-      });
-    }
-    const wall = response.status === 401 || response.status === 403 ? " The page may require authentication or a subscription." : "";
-    throw new Error(`Could not retrieve source ${source.url}: HTTP ${response.status}.${wall}`);
+  let result: Awaited<ReturnType<typeof extractUrlSource>>;
+  try {
+    result = await extractUrlSource(source.url);
+  } catch (error) {
+    if (!(error instanceof SourceHttpError) || !isPublisherAccessRestricted(error.status)) throw error;
+    const store = getStore();
+    await store.replaceSourceFragments(source.id, []);
+    return store.updateProductionSource(source.id, {
+      retrievedAt, processingState: "warning", warnings: [RESEARCH_LEAD_WARNING], error: undefined,
+    });
   }
-  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
-    throw new Error(`Unsupported URL source type: ${contentType || "unknown"}. Upload PDFs with the PDF button.`);
-  }
-  const raw = await response.text();
-  const extracted = contentType.includes("text/html") ? extractReadableHtml(raw) : normalizeText(raw);
-  if (!extracted) throw new Error("No readable article text was found. Paste the text or upload a PDF instead.");
-  const canonicalUrl = canonicalSourceUrl(extractCanonicalUrl(raw, source.url));
-  const title = contentType.includes("text/html") ? extractHtmlTitle(raw) : undefined;
-  const publishedAt = contentType.includes("text/html") ? extractPublishedAt(raw) : undefined;
-  const fragments = fragmentReadableText(extracted.slice(0, MAX_EXTRACTED_CHARACTERS)).map((text, ordinal) => ({
-    sourceId: source.id,
-    ordinal,
-    section: ordinal === 0 ? title : `Section ${ordinal + 1}`,
-    text,
-    textHash: sha256(text),
-    extractionMethod: (contentType.includes("text/html") ? "html" : "plain_text") as SourceFragment["extractionMethod"],
-  }));
+  const { title, publishedAt, canonicalUrl, text: extracted } = result;
+  const fragments = result.fragments.map((fragment) => ({ ...fragment, sourceId: source.id }));
   const store = getStore();
   await store.replaceSourceFragments(source.id, fragments);
   return store.updateProductionSource(source.id, {
@@ -188,8 +165,9 @@ async function processUrlSource(source: ProductionSource) {
     publishedAt,
     retrievedAt,
     sha256: sha256(extracted),
-    processingState: publishedAt ? "ready" : "warning",
-    warnings: publishedAt ? [] : ["Publication date could not be determined."],
+    pageCount: result.pageCount,
+    processingState: result.warnings.length ? "warning" : "ready",
+    warnings: result.warnings,
     error: undefined,
   });
 }
@@ -204,23 +182,77 @@ async function hydrateSource(input: SourceInput, retrievedAt: string): Promise<S
   // because it is an access-restricted research lead; do not silently refetch
   // it inside production creation.
   if (input.kind !== "url" || input.sourceRecordId || input.extractedText?.trim()) return input;
-  const response = await fetchGuarded(input.url, { maxRedirects: 4, timeoutMs: 15_000, maxBytes: MAX_SOURCE_BYTES });
-  if (!response.ok) throw new Error(`Could not retrieve source ${input.url}: HTTP ${response.status}`);
-  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
-    throw new Error(`Unsupported URL source type for ${input.url}: ${contentType || "unknown"}`);
-  }
-  const raw = await response.text();
-  const extracted = contentType.includes("text/html") ? extractReadableHtml(raw) : normalizeText(raw);
-  if (!extracted) throw new Error(`No readable text was found at ${input.url}`);
+  const result = await extractUrlSource(input.url);
   return {
     ...input,
-    title: input.title ?? (contentType.includes("text/html") ? extractHtmlTitle(raw) : undefined),
-    canonicalUrl: canonicalSourceUrl(input.url),
-    extractedText: extracted.slice(0, MAX_EXTRACTED_CHARACTERS),
-    publishedAt: input.publishedAt ?? (contentType.includes("text/html") ? extractPublishedAt(raw) : undefined),
+    title: input.title ?? result.title,
+    canonicalUrl: result.canonicalUrl,
+    extractedText: result.text,
+    publishedAt: input.publishedAt ?? result.publishedAt,
     retrievedAt,
   };
+}
+
+class SourceHttpError extends Error {
+  constructor(readonly status: number) { super(`Could not retrieve the source: HTTP ${status}. Paste the full text or upload a PDF instead.`); }
+}
+
+type ExtractedUrlSource = {
+  text: string;
+  title?: string;
+  canonicalUrl: string;
+  publishedAt?: string;
+  pageCount?: number;
+  warnings: string[];
+  fragments: Array<Omit<SourceFragment, "id" | "sourceId" | "createdAt">>;
+};
+
+/** Shared by direct URL requests and the durable project-source importer. */
+export async function extractUrlSource(url: string): Promise<ExtractedUrlSource> {
+  const initial = await readUrlSource(url);
+  if (!initial.fullTextUrls.length) return initial;
+  for (const fullTextUrl of initial.fullTextUrls.slice(0, 2)) {
+    try {
+      const full = await readUrlSource(fullTextUrl);
+      if (full.text.length < 500 || full.fullTextUrls.length) continue;
+      return {
+        ...full,
+        title: initial.title ?? full.title,
+        publishedAt: initial.publishedAt ?? full.publishedAt,
+        warnings: [...full.warnings.filter((warning) => !initial.publishedAt || !warning.includes("Publication date"))],
+      };
+    } catch {
+      // A publisher's HTML rendition may be unavailable; try its declared PDF.
+      // Every attempt still passes through guarded DNS, redirects and byte limits.
+    }
+  }
+  throw new Error("Only the paper's landing page or abstract was accessible. Upload its full PDF or paste the full article text to create an explainer.");
+}
+
+async function readUrlSource(url: string): Promise<ExtractedUrlSource & { fullTextUrls: string[] }> {
+  const response = await fetchGuarded(url, { maxRedirects: 4, timeoutMs: 15_000, maxBytes: MAX_PDF_BYTES });
+  if (!response.ok) throw new SourceHttpError(response.status);
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (contentType.includes("application/pdf") || bytes.subarray(0, 5).toString("ascii") === "%PDF-") {
+    const result = await extractPdfFragments(bytes);
+    return { ...result, text: result.fragments.map((fragment) => fragment.text).join("\n\n").slice(0, MAX_EXTRACTED_CHARACTERS), canonicalUrl: canonicalSourceUrl(url), fullTextUrls: [] };
+  }
+  if (bytes.length > MAX_SOURCE_BYTES) throw new Error("Article exceeds the 2 MB HTML source limit.");
+  if (!contentType.includes("text/html") && !contentType.includes("text/plain")) throw new Error(`Unsupported URL source type: ${contentType || "unknown"}. Upload a PDF or paste the text.`);
+  const article = contentType.includes("text/html") ? extractArticle(bytes.toString("utf8"), url) : { text: normalizeText(bytes.toString("utf8")), headings: [], canonicalUrl: url, fullTextUrls: [], title: undefined, publishedAt: undefined };
+  if (!article.text.trim() && !article.fullTextUrls.length) throw new Error("No readable article body was found. Paste the text or upload a PDF instead.");
+  const text = article.text.slice(0, MAX_EXTRACTED_CHARACTERS);
+  const warnings = article.publishedAt ? [] : ["Publication date could not be determined."];
+  if (text.length < article.text.length) warnings.push("Extracted text reached the 200,000 character source limit.");
+  let section = article.title;
+  const fragments = fragmentReadableText(text).map((text, ordinal) => {
+    const headings = text.split(/\n+/).filter((line) => article.headings.includes(line.trim()));
+    const currentSection = headings[0] ?? section;
+    section = headings.at(-1) ?? section;
+    return { ordinal, section: currentSection?.slice(0, 240) ?? `Section ${ordinal + 1}`, text, textHash: sha256(text), extractionMethod: (contentType.includes("text/html") ? "html" : "plain_text") as SourceFragment["extractionMethod"] };
+  });
+  return { ...article, canonicalUrl: canonicalSourceUrl(article.canonicalUrl), text, fragments, warnings };
 }
 
 export async function extractPdfFragments(
@@ -244,7 +276,7 @@ export async function extractPdfFragments(
     if (remaining <= 1) throw new Error("PDF processing timed out. Split the document into smaller files.");
     const page = await boundedPdfOperation(document.getPage(pageNumber), Math.min(30_000, remaining));
     const content = await boundedPdfOperation(page.getTextContent(), Math.min(30_000, remaining));
-    const digitalText = normalizeText(content.items.map((item) => "str" in item ? item.str : "").join(" "));
+    const digitalText = normalizeText(content.items.map((item) => "str" in item ? `${item.str}${item.hasEOL ? "\n" : " "}` : "").join(""));
     let text = digitalText;
     let method: SourceFragment["extractionMethod"] = "digital";
     if (digitalText.replace(/\W/g, "").length < MIN_DIGITAL_PAGE_CHARACTERS) {
@@ -317,17 +349,7 @@ async function ocrPdfPage(png: Buffer, pageNumber: number) {
 }
 
 export function extractReadableHtml(html: string) {
-  const main = /<main\b[^>]*>([\s\S]*?)<\/main>/i.exec(html)?.[1] ?? html;
-  return normalizeText(
-    decodeHtmlEntities(
-      main
-        .replace(/<!--[\s\S]*?-->/g, " ")
-        .replace(/<(script|style|noscript|svg|canvas|template|nav|header|footer|form|aside|button)[^>]*>[\s\S]*?<\/\1>/gi, " ")
-        .replace(/<br\s*\/?>/gi, "\n")
-        .replace(/<\/(p|div|article|section|main|h[1-6]|li|blockquote)>/gi, "\n")
-        .replace(/<[^>]+>/g, " "),
-    ),
-  );
+  return extractArticle(html).text;
 }
 
 export function canonicalSourceUrl(rawUrl: string) {
@@ -340,36 +362,12 @@ export function canonicalSourceUrl(rawUrl: string) {
   return url.toString();
 }
 
-function extractCanonicalUrl(html: string, fallback: string) {
-  const match = /<link[^>]+rel=["'][^"']*canonical[^"']*["'][^>]+href=["']([^"']+)["']/i.exec(html)
-    ?? /<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*canonical/i.exec(html);
-  if (!match) return fallback;
-  try { return new URL(match[1], fallback).toString(); } catch { return fallback; }
-}
-
-function extractHtmlTitle(html: string) {
-  const match = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  return match ? normalizeText(decodeHtmlEntities(match[1])).slice(0, 200) || undefined : undefined;
-}
-
-function extractPublishedAt(html: string) {
-  const patterns = [
-    /<meta[^>]+(?:property|name)=["'](?:article:published_time|datePublished|date)["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:article:published_time|datePublished|date)["']/i,
-    /"datePublished"\s*:\s*"([^"]+)"/i,
-  ];
-  for (const pattern of patterns) {
-    const match = pattern.exec(html);
-    if (match && !Number.isNaN(Date.parse(match[1]))) return new Date(match[1]).toISOString();
-  }
-  return undefined;
-}
-
 function chunkText(value: string, size = 12_000) {
   const chunks: string[] = [];
   let remaining = value.trim();
   while (remaining.length > size) {
-    const breakAt = Math.max(1, remaining.lastIndexOf("\n", size), remaining.lastIndexOf(". ", size) + 1);
+    const boundary = Math.max(remaining.lastIndexOf("\n", size), remaining.lastIndexOf(". ", size) + 1);
+    const breakAt = boundary > size / 2 ? boundary : size;
     chunks.push(remaining.slice(0, breakAt).trim());
     remaining = remaining.slice(breakAt).trim();
   }
@@ -381,27 +379,19 @@ export function fragmentReadableText(value: string, maxFragments = 300) {
   const paragraphs = value.split(/\n+/).map((part) => part.trim()).filter(Boolean);
   const fragments: string[] = [];
   for (const paragraph of paragraphs) {
-    if (fragments.length >= maxFragments) break;
     if (paragraph.length <= 1_500) {
       fragments.push(paragraph);
       continue;
     }
-    fragments.push(...chunkText(paragraph, 1_500).slice(0, maxFragments - fragments.length));
+    fragments.push(...chunkText(paragraph, 1_500));
   }
-  return fragments.length > 0 ? fragments : chunkText(value, 1_500).slice(0, maxFragments);
-}
-
-function decodeHtmlEntities(value: string) {
-  const named: Record<string, string> = { amp: "&", apos: "'", gt: ">", lt: "<", nbsp: " ", quot: "\"" };
-  return value.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (entity, body: string) => {
-    if (body.startsWith("#x")) return safeCodePoint(Number.parseInt(body.slice(2), 16), entity);
-    if (body.startsWith("#")) return safeCodePoint(Number.parseInt(body.slice(1), 10), entity);
-    return named[body.toLowerCase()] ?? entity;
-  });
-}
-
-function safeCodePoint(codePoint: number, fallback: string) {
-  try { return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : fallback; } catch { return fallback; }
+  if (fragments.length <= maxFragments) return fragments;
+  // Compact adjacent fragments instead of throwing away results/conclusions
+  // when a paper contains hundreds of small math or table blocks.
+  return Array.from({ length: Math.max(1, maxFragments) }, (_, index) => fragments.slice(
+    Math.floor(index * fragments.length / Math.max(1, maxFragments)),
+    Math.floor((index + 1) * fragments.length / Math.max(1, maxFragments)),
+  ).join("\n\n"));
 }
 
 function normalizeText(value: string) {

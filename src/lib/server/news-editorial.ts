@@ -173,11 +173,16 @@ function scriptBlockers(job: VideoJob) {
     blockers.push(`Narration is ${budget.words} words; the ${job.durationSeconds}-second voice budget is ${budget.budgetWords}. Condense the script before approval.`);
   }
   if (budget.predictedCoverage < 0.75) blockers.push(`Predicted spoken coverage is ${Math.round(budget.predictedCoverage * 100)}%; add sourced context or shorten the selected duration before approval.`);
-  if (job.contentType !== "news_digest") return blockers;
+  if (job.contentType !== "news_digest" && job.contentType !== "explainer") return blockers;
   const claims = new Map((job.sourceBundle?.claims ?? []).map((claim) => [claim.id, claim]));
   const narratedClaimIds = new Set(
     [...(job.script?.matchAll(/\[claim:([^\]]+)\]/g) ?? [])].map((match) => match[1]),
   );
+  // Explainers retain their editable, narration-only script format. Their
+  // citation lineage is carried by the synchronized storyboard scenes.
+  if (job.contentType === "explainer") {
+    for (const scene of job.storyboard?.scenes ?? []) for (const claimId of scene.claimIds) narratedClaimIds.add(claimId);
+  }
   for (const claimId of narratedClaimIds) {
     const claim = claims.get(claimId);
     if (!claim) {

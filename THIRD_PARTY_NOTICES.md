@@ -10,6 +10,8 @@ The MIT license applies to original Cocoa Director source, not to independently 
 | Lightning CSS and axe-core | MPL-2.0; preserve the upstream file licenses and applicable source availability when redistributing |
 | `@vercel/cli-auth` | npm metadata omits the license; the declared [Vercel source repository](https://github.com/vercel/vercel/blob/main/LICENSE) supplies Apache-2.0 |
 | xz-decompress and tar-stream | MIT; portable extraction of the verified FFmpeg archive in Vercel Functions |
+| Mozilla Readability | Apache-2.0; article-body extraction, see `@mozilla/readability` license and notices |
+| LinkeDOM | ISC; inert HTML parsing, see the installed `linkedom` license |
 | FFmpeg command-line tools | GPL or LGPL according to the build; independent upstream executable, not relicensed under MIT |
 | Liberation fonts included by PDF.js | GPL-2.0 with the upstream font embedding exception; [complete notice](docs/licenses/LIBERATION.txt) |
 | Foxit standard fonts included by PDF.js | Upstream permission and copyright notice; [complete notice](docs/licenses/FOXIT.txt) |

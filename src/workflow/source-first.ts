@@ -9,6 +9,7 @@ import type {
 import { isExplicitBreakingClaim } from "@/lib/news-claims";
 import { narrationWordBudget } from "@/lib/hybrid-visuals";
 import { validateTimeline } from "@/lib/production";
+import { isSourceMetadata, selectExplainerUnits, sourceSentences } from "@/lib/source-content";
 
 export type SourceFirstDraft = {
   sourceBundle: SourceBundle;
@@ -28,17 +29,22 @@ export function buildSourceFirstDraft(
   now = new Date().toISOString(),
   preferredOutline?: SourceFirstOutlineScene[],
 ): SourceFirstDraft {
-  const sourceUnits = input.sourceBundle.inputs.flatMap((source) => {
+  const supportedClaims = input.sourceBundle.claims.filter((claim) => claim.status === "supported" && claim.editorialStatus !== "excluded");
+  const sourceUnits: Array<{ sentence: string; sourceId: string; kind: string; claimId?: string; sourceIds?: string[] }> = input.contentType === "explainer" && supportedClaims.length
+    ? supportedClaims.map((claim) => ({ sentence: claim.text, sourceId: claim.sourceIds[0], sourceIds: claim.sourceIds, kind: "text", claimId: claim.id }))
+    : input.sourceBundle.inputs.flatMap((source) => {
     const text = source.kind === "text" ? source.text : source.extractedText;
     if (!text) return [];
-    return splitSentences(text).map((sentence) => ({ sentence, sourceId: source.id, kind: source.kind }));
+    return (input.contentType === "explainer" ? sourceSentences(text) : splitSentences(text)).map((sentence) => ({ sentence, sourceId: source.id, kind: source.kind }));
   });
   if (sourceUnits.length === 0) {
+    if (input.contentType === "explainer" && input.sourceBundle.inputs.length > 0) throw new Error("The supplied sources contain no readable article body. Paste the full text or upload a PDF.");
     sourceUnits.push({ sentence: input.brief, sourceId: "brief", kind: "text" });
   }
 
   const targetWords = narrationWordBudget(input.targetDurationSeconds);
-  const selected = selectToWordBudget(sourceUnits, targetWords);
+  const selected = input.contentType === "explainer" ? selectExplainerUnits(sourceUnits, targetWords) : selectToWordBudget(sourceUnits, targetWords);
+  if (!selected.length) throw new Error("The source cannot form a complete narration within this duration. Supply concise notes or increase the duration.");
   const sceneCount = Math.min(40, Math.max(input.contentType === "news_digest" ? 6 : 3, Math.round(input.targetDurationSeconds / 10)));
   const grouped = partition(selected, Math.min(sceneCount, selected.length));
   const outline = preferredOutline ?? grouped.map((group, index) => {
@@ -49,8 +55,8 @@ export function buildSourceFirstDraft(
       title: sceneTitle(narration, index),
       narration,
       visual: visualTreatmentFor(narration, index),
-      claimIds: splitSentences(narration).map((_, sentenceIndex) => `claim-${id}-${sentenceIndex + 1}`),
-      sourceIds: [...new Set(group.map((unit) => unit.sourceId))],
+      claimIds: group.every((unit) => unit.claimId) ? group.map((unit) => unit.claimId!) : splitSentences(narration).map((_, sentenceIndex) => `claim-${id}-${sentenceIndex + 1}`),
+      sourceIds: [...new Set(group.flatMap((unit) => unit.sourceIds ?? [unit.sourceId]))],
     };
   });
   const script = outline.map((scene) => scene.narration).join("\n\n");
@@ -160,18 +166,23 @@ function withDerivedClaims(
     ...sourceBundle,
     asOf: sourceBundle.asOf ?? asOf,
     claims: outline.flatMap((scene) => splitSentences(scene.narration).map((sentence, sentenceIndex) => {
-      const independentlySourced = scene.sourceIds.some((sourceId) => sourceId !== "brief" && sourceKinds.has(sourceId));
+      const evidenceSourceIds = scene.sourceIds.filter((sourceId) => {
+        const source = sourceBundle.inputs.find((input) => input.id === sourceId);
+        const text = source?.kind === "text" ? source.text : source?.extractedText;
+        return text?.replace(/\s+/g, " ").includes(sentence.replace(/\s+/g, " "));
+      });
+      const independentlySourced = evidenceSourceIds.some((sourceId) => sourceId !== "brief" && sourceKinds.has(sourceId));
       const breaking = isExplicitBreakingClaim(sentence);
-      const sufficientlyCorroborated = !breaking || new Set(scene.sourceIds.filter((sourceId) => sourceId !== "brief")).size >= 2;
+      const sufficientlyCorroborated = !breaking || new Set(evidenceSourceIds).size >= 2;
       return {
         id: `claim-${scene.id}-${sentenceIndex + 1}`,
         text: sentence,
-        sourceIds: scene.sourceIds.filter((sourceId) => sourceId !== "brief"),
+        sourceIds: evidenceSourceIds,
         asOf,
         confidence: independentlySourced && sufficientlyCorroborated ? 0.75 : 0.35,
         status: independentlySourced && sufficientlyCorroborated ? "supported" as const : breaking && independentlySourced ? "contested" as const : "unverified" as const,
         evidence: independentlySourced ? [sentence.slice(0, 1_000)] : [],
-        evidenceRefs: independentlySourced ? scene.sourceIds
+        evidenceRefs: independentlySourced ? evidenceSourceIds
           .filter((sourceId) => sourceId !== "brief")
           .map((sourceId) => ({
             sourceId,
@@ -179,7 +190,7 @@ function withDerivedClaims(
             excerptHash: deterministicExcerptHash(sentence),
           })) : [],
         editorialStatus: "draft" as const,
-        independenceGroup: scene.sourceIds.filter((sourceId) => sourceId !== "brief").join("|"),
+        independenceGroup: evidenceSourceIds.join("|"),
         breaking,
       };
     })),
@@ -214,9 +225,7 @@ function splitSentences(value: string) {
 }
 
 function isPageChrome(value: string) {
-  return /^(?:site search|search|menu|mega menu|topics|load more|sign in|log in|desktop logo|mobile logo|toggle)$/i.test(value)
-    || /\b(?:desktop|mobile) logo\b/i.test(value)
-    || /\b(?:site search|mega menu) toggle\b/i.test(value);
+  return isSourceMetadata(value);
 }
 
 function partition<T>(items: T[], groupCount: number): T[][] {

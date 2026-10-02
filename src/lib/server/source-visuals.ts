@@ -4,10 +4,15 @@ import type { GraphicSpecV2, HybridVisualPlanV2, SourceBundle, SourceVisualArtif
 export function attachAuthenticSourceVisuals(plan: HybridVisualPlanV2, sourceBundle: SourceBundle): HybridVisualPlanV2 {
   const claims = new Map(sourceBundle.claims.map((claim) => [claim.id, claim]));
   const sources = new Map(sourceBundle.inputs.map((source) => [source.id, source]));
+  const sceneEvidenceCounts = new Map<string, number>();
   const beats = plan.beats.map((beat) => {
     if (!isInformationBeat(beat)) return beat;
-    const evidence = beat.evidenceIds.flatMap((claimId) => claims.get(claimId)?.evidenceRefs ?? [])
-      .find((reference) => beat.sourceIds.length === 0 || beat.sourceIds.includes(reference.sourceId));
+    const references = [...new Map(beat.evidenceIds.flatMap((claimId) => claims.get(claimId)?.evidenceRefs ?? [])
+      .filter((reference) => beat.sourceIds.length === 0 || beat.sourceIds.includes(reference.sourceId))
+      .map((reference) => [`${reference.sourceId}:${reference.excerptHash}`, reference])).values()];
+    const evidenceIndex = sceneEvidenceCounts.get(beat.sceneId) ?? 0;
+    const evidence = references[evidenceIndex % Math.max(1, references.length)];
+    sceneEvidenceCounts.set(beat.sceneId, evidenceIndex + 1);
     const source = evidence ? sources.get(evidence.sourceId) : undefined;
     if (!evidence || !source) return { ...beat, graphicSpec: undefined, sourceVisual: undefined };
     const excerptHash = evidence.excerptHash.toLowerCase();
@@ -28,9 +33,8 @@ export function attachAuthenticSourceVisuals(plan: HybridVisualPlanV2, sourceBun
       excerpt: evidence.excerpt,
       excerptHash,
       sourceUrl: source.kind === "url" ? source.canonicalUrl ?? source.url : evidence.sourceUrl,
-      extractionMethod: source.kind === "document"
-        ? evidence.extractionMethod === "plain_text" || evidence.extractionMethod === "html" || evidence.extractionMethod === "research" ? undefined : evidence.extractionMethod ?? (evidence.pageNumber ? "digital" : "ocr")
-        : evidence.extractionMethod === "research" ? "research" : "html",
+      extractionMethod: evidence.extractionMethod === "plain_text" ? undefined
+        : evidence.extractionMethod ?? (source.kind === "document" ? evidence.pageNumber ? "digital" : "ocr" : "html"),
     };
     const sourceExcerptSpec: GraphicSpecV2 = {
       version: 2,

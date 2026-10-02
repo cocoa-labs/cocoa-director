@@ -53,6 +53,14 @@ Reusing an idempotency key with the same input returns the original resource; ch
 
 Recovery and regeneration retain completed assets and create new versions. Inspect failed steps, current approvals, and remaining budget before retrying. Restoring a version does not erase its sibling outputs. Editorial approvals apply to a specific script/storyboard version and must be renewed after edits.
 
+### Article and paper explainers
+
+URL imports extract the article body, excluding navigation and publication metadata. arXiv abstract links resolve to the full HTML paper, with the publisher's PDF as a fallback. Direct PDF URLs and publisher-declared PDF links are supported. Every download uses the existing guarded fetch and size limits. If only a paper's landing page is accessible, import reports that limitation and asks for the full PDF or pasted text.
+
+Live explainers analyze source evidence before writing a connected explanation of the question, mechanism, findings and supported limitations. Long documents are sampled across their body, including later sections, within bounded provider inputs. Narration, storyboard scenes and evidence graphics retain their source references. Source text is untrusted evidence, never an instruction to the writer. Provider enablement, reservations and script/storyboard approvals still apply. Mock mode uses deterministic excerpts and synthetic media.
+
+Existing saved productions retain their approved artifacts. To rebuild an older URL-based draft with the improved extraction, retry or re-import its source and regenerate the editorial draft; review the new script and storyboard before generation. Music-video planning and generation are unchanged.
+
 ### Common problems
 
 | Symptom | Action |

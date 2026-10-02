@@ -29,7 +29,7 @@ async function handlePOST(request: Request) {
     }
 
     const legacyRequest = legacyVideoRequestForProduction(input);
-    const estimatedCostCents = input.contentType === "music_video" ? estimateCreateVideoCents(legacyRequest) : input.contentType === "news_digest" ? 200 : 50;
+    const estimatedCostCents = input.contentType === "music_video" ? estimateCreateVideoCents(legacyRequest) : input.contentType === "news_digest" || input.contentType === "explainer" ? 200 : 50;
     const action = input.contentType === "music_video"
       ? input.autopilot ? "create_video_autopilot" : "create_video_stage"
       : `create_${input.contentType}_draft`;

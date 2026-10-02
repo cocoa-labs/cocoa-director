@@ -9,7 +9,7 @@ import { isCinematicReenactmentsEnabled, isEditorialDirectionV3Enabled, isEditor
 import { attachAuthenticSourceVisuals } from "@/lib/server/source-visuals";
 import { getStore } from "@/lib/server/store";
 import { corroborateNewsBundle } from "@/lib/server/news-research";
-import { fitNewsEditorialOutline, fitOutlineToNarrationBudget, generateNewsEditorialOutline } from "@/lib/server/news-editorial-ai";
+import { fitNewsEditorialOutline, generateNewsEditorialOutline } from "@/lib/server/news-editorial-ai";
 import { auditDifficultNewsClaims } from "@/lib/server/news-factual-audit";
 import { extractIntelligentNewsClaims } from "@/lib/server/news-source-intelligence";
 import { hydrateBundleFromRecords, hydrateSourceBundle } from "@/lib/server/source-processing";
@@ -55,8 +55,8 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
     if (!projectId) throw new Error("projectId is required for web corroboration.");
     hydratedSources = await corroborateNewsBundle({ bundle: hydratedSources, brief: input.brief, projectId, userId: user.id });
   }
-  if (input.contentType === "news_digest") {
-    hydratedSources = await extractIntelligentNewsClaims(hydratedSources, input.digestMode);
+  if (input.contentType === "news_digest" || input.contentType === "explainer") {
+    hydratedSources = await extractIntelligentNewsClaims(hydratedSources, input.digestMode, input.contentType);
   }
   const job = await store.createJob(legacyVideoRequestForProduction(input), user, projectId);
   for (const sourceId of input.sourceRecordIds) {
@@ -87,15 +87,16 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
   let sourceBundle = input.contentType === "news_digest"
     ? await auditDifficultNewsClaims(await linkClaimEvidence(draft.sourceBundle))
     : await linkClaimEvidence(draft.sourceBundle);
-  if (input.contentType === "news_digest") {
+  if (input.contentType === "news_digest" || input.contentType === "explainer") {
     const editorialOutline = await generateNewsEditorialOutline({ request: input, sourceBundle });
     if (editorialOutline) {
       draft = buildSourceFirstDraft(job.id, { ...input, sourceBundle }, now, editorialOutline);
-      sourceBundle = await auditDifficultNewsClaims(await linkClaimEvidence(draft.sourceBundle));
+      sourceBundle = await linkClaimEvidence(draft.sourceBundle);
+      if (input.contentType === "news_digest") sourceBundle = await auditDifficultNewsClaims(sourceBundle);
     }
     sourceBundle = applyEditorialClaimSelection(sourceBundle, draft.editorialPlan.scenes.flatMap((scene) => scene.claimIds));
   }
-  const linkedStoryboard = input.contentType === "news_digest"
+  const linkedStoryboard = input.contentType === "news_digest" || input.contentType === "explainer"
     ? citationLinkedStoryboard(draft.storyboard, sourceBundle)
     : draft.storyboard;
   const plannedVisualsBase = isHybridVisualsV2Enabled()
@@ -145,14 +146,14 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
 
 export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserContext) {
   if (job.status === "running" || job.cancellationRequested) throw new ApiRequestError("This production cannot be edited while running or after cancellation.", 409, "production_not_editable");
-  if (job.contentType !== "news_digest" || job.userId !== user.id) throw new Error("News production not found.");
+  if ((job.contentType !== "news_digest" && job.contentType !== "explainer") || job.userId !== user.id) throw new Error("Editorial production not found.");
   const store = getStore();
   const sources = (await store.listProductionSources(job.projectId)).filter((source) => source.productionId === job.id);
   if (sources.length === 0) throw new Error("Add at least one ready source before regenerating the editorial draft.");
   const now = new Date().toISOString();
   let sourceBundle = await hydrateBundleFromRecords({ inputs: [], claims: [] }, sources.map((source) => source.id), user.id, job.projectId);
   const request = ProductionCreateRequest.parse({
-    contentType: "news_digest",
+    contentType: job.contentType,
     projectId: job.projectId,
     brief: job.prompt,
     sourceBundle,
@@ -165,13 +166,15 @@ export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserCont
     aspectRatio: job.aspectRatio,
     qualityTier: job.qualityTier ?? "standard",
   });
-  sourceBundle = await extractIntelligentNewsClaims(sourceBundle, request.digestMode);
+  sourceBundle = await extractIntelligentNewsClaims(sourceBundle, request.digestMode, job.contentType);
   let draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle }, now);
-  let linkedBundle = await auditDifficultNewsClaims(await linkClaimEvidence(draft.sourceBundle));
+  let linkedBundle = await linkClaimEvidence(draft.sourceBundle);
+  if (job.contentType === "news_digest") linkedBundle = await auditDifficultNewsClaims(linkedBundle);
   const editorialOutline = await generateNewsEditorialOutline({ request, sourceBundle: linkedBundle });
   if (editorialOutline) {
     draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle: linkedBundle }, now, editorialOutline);
-    linkedBundle = await auditDifficultNewsClaims(await linkClaimEvidence(draft.sourceBundle));
+    linkedBundle = await linkClaimEvidence(draft.sourceBundle);
+    if (job.contentType === "news_digest") linkedBundle = await auditDifficultNewsClaims(linkedBundle);
   }
   linkedBundle = applyEditorialClaimSelection(linkedBundle, draft.editorialPlan.scenes.flatMap((scene) => scene.claimIds));
   const linkedStoryboard = citationLinkedStoryboard(draft.storyboard, linkedBundle);
@@ -180,12 +183,12 @@ export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserCont
     : undefined;
   const visualPlan = visualPlanBase && isSourceVisualsV2Enabled() ? attachAuthenticSourceVisuals(visualPlanBase, linkedBundle) : visualPlanBase;
   const storyboard = attachVisualPlanToStoryboard(linkedStoryboard, visualPlan);
-  const script = citedScript(draft.editorialPlan.scenes, linkedBundle);
+  const script = job.contentType === "news_digest" ? citedScript(draft.editorialPlan.scenes, linkedBundle) : draft.script;
   const qaReport = validateTimeline({ timeline: draft.timeline, sourceBundle: linkedBundle, checkedAt: now });
   const recoveryBudgetCents = visualPlan ? Math.ceil(visualPlan.metrics.estimatedCostCents * 0.15) : 0;
   const scriptVersionId = randomUUID();
   const storyboardVersionId = randomUUID();
-  const workflowSteps = markDraftSteps(initialWorkflowSteps("news_digest"), "news_digest", qaReport.passed, now)
+  const workflowSteps = markDraftSteps(initialWorkflowSteps(job.contentType), job.contentType, qaReport.passed, now)
     .map((step) => step.id === "script" ? { ...step, artifactVersionId: scriptVersionId } : step.id === "storyboard" ? { ...step, artifactVersionId: storyboardVersionId } : step);
   return store.updateJob(job.id, {
     sourceBundle: linkedBundle,
@@ -235,21 +238,15 @@ export async function fitProductionEditorialDraft(job: VideoJob, user: UserConte
     qualityTier: job.qualityTier ?? "standard",
   });
 
-  const fittedOutline = job.contentType === "news_digest"
-    ? await fitNewsEditorialOutline({ request, sourceBundle: job.sourceBundle, currentOutline: job.editorialPlan.scenes })
-    : fitOutlineToNarrationBudget(job.editorialPlan.scenes, job.sourceBundle, job.durationSeconds);
+  const fittedOutline = await fitNewsEditorialOutline({ request, sourceBundle: job.sourceBundle, currentOutline: job.editorialPlan.scenes });
   const fittedBudget = narrationBudgetSummary(fittedOutline.map((scene) => scene.narration).join(" "), job.durationSeconds);
   if (fittedBudget.predictedCoverage < 0.75 || !fittedBudget.withinBudget) {
     throw new ApiRequestError(`The current script predicts ${Math.round(fittedBudget.predictedDurationMs / 1_000)} seconds of narration for a ${job.durationSeconds}-second target. Edit the script or adjust its duration before approval.`, 422, "narration_outside_budget");
   }
 
   const draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle: job.sourceBundle }, now, fittedOutline);
-  const sourceBundle = job.contentType === "news_digest"
-    ? applyEditorialClaimSelection(job.sourceBundle, fittedOutline.flatMap((scene) => scene.claimIds))
-    : await linkClaimEvidence(draft.sourceBundle);
-  const linkedStoryboard = job.contentType === "news_digest"
-    ? citationLinkedStoryboard(draft.storyboard, sourceBundle)
-    : draft.storyboard;
+  const sourceBundle = applyEditorialClaimSelection(await linkClaimEvidence(draft.sourceBundle), fittedOutline.flatMap((scene) => scene.claimIds));
+  const linkedStoryboard = citationLinkedStoryboard(draft.storyboard, sourceBundle);
   const visualPlanBase = isHybridVisualsV2Enabled()
     ? buildHybridVisualPlan({ productionId: job.id, request, storyboard: linkedStoryboard, createdAt: now, directionVersion: isEditorialTimingV2Enabled() ? 4 : isEditorialDirectionV3Enabled() ? 3 : 2 })
     : undefined;
@@ -308,11 +305,22 @@ async function linkClaimEvidence(sourceBundle: SourceBundle): Promise<SourceBund
     claims: sourceBundle.claims.map((claim) => {
       const evidenceRefs = claim.sourceIds.flatMap((sourceId) => {
         const record = records.get(sourceId);
-        if (!record) return claim.evidenceRefs.filter((evidence) => evidence.sourceId === sourceId)
-          .map((evidence) => ({ ...evidence, excerpt: evidence.excerpt.trim(), excerptHash: createHash("sha256").update(evidence.excerpt.trim()).digest("hex") }));
-        const fragment = bestEvidenceFragment(claim.text, record.fragments);
+        if (!record) {
+          const source = sourceBundle.inputs.find((source) => source.id === sourceId);
+          const text = source?.kind === "text" ? source.text : source?.extractedText ?? "";
+          return claim.evidenceRefs.filter((evidence) => evidence.sourceId === sourceId).flatMap((evidence) => {
+            const excerpt = exactEvidenceSpan(text, evidence.excerpt);
+            return excerpt ? [{ ...evidence, excerpt, excerptHash: createHash("sha256").update(excerpt).digest("hex"), sourceUrl: source?.kind === "url" ? source.canonicalUrl ?? source.url : evidence.sourceUrl }] : [];
+          });
+        }
+        const previous = claim.evidenceRefs.find((evidence) => evidence.sourceId === sourceId);
+        const fragment = (previous && record.fragments.find((fragment) => exactEvidenceSpan(fragment.text, previous.excerpt)))
+          ?? bestEvidenceFragment(claim.text, record.fragments);
         if (!fragment) return [];
-        const excerpt = fragment.text.slice(0, 1_000).trim();
+        const excerpt = (previous && exactEvidenceSpan(fragment.text, previous.excerpt))
+          || exactEvidenceSpan(fragment.text, claim.text)
+          || bestEvidenceSentence(claim.text, fragment.text);
+        if (!excerpt) return [];
         return [{
           sourceId,
           fragmentId: fragment.id,
@@ -345,7 +353,19 @@ async function linkClaimEvidence(sourceBundle: SourceBundle): Promise<SourceBund
 
 function bestEvidenceFragment(claim: string, fragments: SourceFragment[]) {
   const words = new Set(claim.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []);
-  return [...fragments].sort((left, right) => scoreFragment(right.text, words) - scoreFragment(left.text, words))[0];
+  return [...fragments].filter((fragment) => scoreFragment(fragment.text, words) > 0).sort((left, right) => scoreFragment(right.text, words) - scoreFragment(left.text, words))[0];
+}
+
+function exactEvidenceSpan(text: string, excerpt: string) {
+  if (!excerpt.trim()) return undefined;
+  const pattern = excerpt.trim().split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+  return new RegExp(pattern, "i").exec(text)?.[0].slice(0, 1_000);
+}
+
+function bestEvidenceSentence(claim: string, text: string) {
+  const words = new Set(claim.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []);
+  return text.split(/(?<=[.!?])\s+|\n+/).filter((sentence) => sentence.trim().length > 20)
+    .sort((left, right) => scoreFragment(right, words) - scoreFragment(left, words))[0]?.trim().slice(0, 1_000);
 }
 
 function scoreFragment(text: string, words: Set<string>) {
@@ -365,7 +385,7 @@ function citationLinkedStoryboard(storyboard: NonNullable<VideoJob["storyboard"]
         const label = titles.get(evidence.sourceId) ?? "Source";
         return evidence.pageNumber ? `${label}, p. ${evidence.pageNumber}` : evidence.section ? `${label} · ${evidence.section}` : label;
       });
-      return { ...scene, citationLabels: [...new Set(labels)].slice(0, 4) };
+      return { ...scene, citationLabels: [...new Set(labels)].slice(0, 4).map((label) => label.slice(0, 160)) };
     }),
   };
 }

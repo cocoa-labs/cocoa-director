@@ -1,3 +1,4 @@
+import { editorialSurfaceColors, editorialTextSvg, fitEditorialText, sourceCardSvg } from "@/lib/server/editorial-graphics";
 import { outlineEditorialText, renderFontFiles } from "@/lib/server/render-fonts";
 import { reserveProviderAttempt } from "@/lib/server/budget-ledger";
 import { randomUUID } from "node:crypto";
@@ -683,7 +684,7 @@ async function materializeBeat(
       const page = documentVisualCache.get(cacheKey) ?? renderProductionSourcePdfPage(documentSource, pageNumber);
       documentVisualCache.set(cacheKey, page);
       const { width, height } = dimensions(job.aspectRatio, job.qualityTier === "premium");
-      return { beat, base: await fitEditorialDocumentPage(await page, width, height), baseType: "image", overlay: await renderBeatOverlay(beat, scene, job, sourceTitles) };
+      return { beat, base: await fitEditorialDocumentPage(await page, width, height, job.visualPlan?.continuityKit.palette[0]), baseType: "image", overlay: await renderBeatOverlay(beat, scene, job, sourceTitles, true) };
     }
   }
   if (job.visualPlan?.version === 4 && (beat.kind === "document_excerpt" || beat.kind === "documentary_source" || beat.kind === "data_visualization")) {
@@ -707,7 +708,11 @@ function sourcePageForBeat(job: VideoJob, beat: VisualBeat, sourceId: string) {
 async function renderBeatBackground(beat: VisualBeat, scene: NewsStoryboard["scenes"][number], job: VideoJob) {
   const { width, height } = dimensions(job.aspectRatio, job.qualityTier === "premium");
   const colors = job.visualPlan?.continuityKit.palette ?? ["#07110e", "#15233a", "#75eaa5", "#d9e3dd"];
-  if (beat.sourceVisual && isLayeredEditorialCompositorEnabled()) return sharp(outlineEditorialText(sourceVisualSvg(beat, width, height, colors))).png().toBuffer();
+  const { background, surface } = editorialSurfaceColors(colors);
+  if (beat.sourceVisual && isLayeredEditorialCompositorEnabled()) {
+    const metric = beat.graphicSpec && "values" in beat.graphicSpec ? beat.graphicSpec.values[0] : undefined;
+    return sharp(outlineEditorialText(sourceCardSvg(beat.sourceVisual, scene.title, width, height, colors, metric))).png().toBuffer();
+  }
   const nodes = Array.from({ length: 22 }, (_, index) => {
     const x = ((index * 137) % 1000) / 1000 * width;
     const y = ((index * 251 + beat.index * 83) % 1000) / 1000 * height;
@@ -718,7 +723,7 @@ async function renderBeatBackground(beat: VisualBeat, scene: NewsStoryboard["sce
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
     <defs>
       <radialGradient id="glow" cx="75%" cy="20%"><stop stop-color="${colors[2] ?? "#75eaa5"}" stop-opacity=".34"/><stop offset="1" stop-color="${colors[0] ?? "#07110e"}" stop-opacity="0"/></radialGradient>
-      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors[0] ?? "#07110e"}"/><stop offset=".55" stop-color="${colors[1] ?? "#15233a"}"/><stop offset="1" stop-color="#05070a"/></linearGradient>
+      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${background}"/><stop offset=".55" stop-color="${surface}"/><stop offset="1" stop-color="#05070a"/></linearGradient>
       <filter id="blur"><feGaussianBlur stdDeviation="${height * 0.035}"/></filter>
     </defs>
     <rect width="100%" height="100%" fill="url(#bg)"/><rect width="100%" height="100%" fill="url(#glow)"/>
@@ -729,34 +734,44 @@ async function renderBeatBackground(beat: VisualBeat, scene: NewsStoryboard["sce
   return sharp(outlineEditorialText(svg)).png().toBuffer();
 }
 
-async function renderBeatOverlay(beat: VisualBeat, scene: NewsStoryboard["scenes"][number], job: VideoJob, sourceTitles: Map<string, string>) {
+async function renderBeatOverlay(beat: VisualBeat, scene: NewsStoryboard["scenes"][number], job: VideoJob, sourceTitles: Map<string, string>, hasDocumentPage = false) {
   const { width, height } = dimensions(job.aspectRatio, job.qualityTier === "premium");
   const sourceLabel = scene.sourceIds.map((id) => sourceTitles.get(id) ?? id).slice(0, 2).join("  •  ");
-  const kindLabel = beatKindLabel(beat.kind);
-  const placement = beat.graphicSpec?.overlayPlacement ?? (beat.index % 2 === 0 ? "left" : "right");
+  const kindLabel = job.contentType === "explainer" ? "EXPLAINED" : beatKindLabel(beat.kind);
+  const accent = job.visualPlan?.continuityKit.palette[2] ?? "#75eaa5";
+  const placement = height > width ? "left" : beat.graphicSpec?.overlayPlacement ?? (beat.index % 2 === 0 ? "left" : "right");
   const textX = placement === "right" ? width * 0.56 : width * 0.1;
   const ruleX = placement === "right" ? width * 0.525 : width * 0.065;
-  const titleColumns = placement === "right" ? (job.aspectRatio === "9:16" ? 17 : 22) : (job.aspectRatio === "9:16" ? 22 : 38);
-  const directedTitleLines = wrapText(scene.title, titleColumns).slice(0, 3);
+  const directedTitle = fitEditorialText(scene.title, width * .9 - textX, Math.min(width, height) * .057, 2, 700);
   const disclosure = beat.disclosure.required
     ? `<rect x="${width * 0.06}" y="${height * 0.055}" width="${width * 0.4}" height="${height * 0.048}" rx="${height * 0.012}" fill="#ffb85c" fill-opacity=".94"/><text x="${width * 0.08}" y="${height * 0.087}" fill="#11151a" font-family="Arial" font-size="${Math.round(height * 0.019)}" font-weight="800" letter-spacing="1">${escapeXml(beat.disclosure.label ?? "AI-GENERATED REENACTMENT")}</text>`
     : "";
   if (beat.sourceVisual) {
+    const hasSourceCard = !hasDocumentPage && isLayeredEditorialCompositorEnabled()
+      && !beat.assets.some((asset) => asset.status === "ready" && asset.url && (asset.kind === "image" || asset.kind === "video"));
     const citation = beat.sourceVisual.domain ?? (sourceLabel || "SUPPLIED SOURCE");
-    const excerptLines = wrapText(beat.sourceVisual.excerpt, job.aspectRatio === "9:16" ? 25 : 48).slice(0, 5);
+    const scale = Math.min(width, height);
+    const portrait = height > width;
+    const panelX = width * (portrait ? .1 : .53);
+    const panelWidth = width * (portrait ? .8 : .37);
+    const evidenceTitle = fitEditorialText(scene.title, panelWidth, scale * .046, 2, 700);
+    const excerpt = fitEditorialText(beat.sourceVisual.excerpt, panelWidth, scale * .032, portrait ? 5 : 7);
+    const citationText = fitEditorialText([...new Set([citation, beat.sourceVisual.locator])].join(" · "), width * .84, scale * .021, 1);
     const citedValues = beat.graphicSpec && "version" in beat.graphicSpec && "values" in beat.graphicSpec ? beat.graphicSpec.values : [];
-    const metricPanel = citedValues.length > 0
+    const metricPanel = citedValues.length > 0 && beat.assets.some((asset) => asset.status === "ready" && asset.url)
       ? `<rect x="${width * .54}" y="${height * .19}" width="${width * .36}" height="${height * .34}" rx="${height * .025}" fill="#07110e" fill-opacity=".93" stroke="#75eaa5" stroke-opacity=".65"/><text x="${width * .58}" y="${height * .25}" fill="#75eaa5" font-family="Arial" font-size="${Math.round(height * .018)}" font-weight="800" letter-spacing="2">CITED VALUE</text><text x="${width * .58}" y="${height * .39}" fill="#f4f7f5" font-family="Arial" font-size="${Math.round(height * .085)}" font-weight="850">${escapeXml(`${citedValues[0].value.toLocaleString()} ${citedValues[0].unit ?? ""}`.trim())}</text><text x="${width * .58}" y="${height * .465}" fill="#b8c7c0" font-family="Arial" font-size="${Math.round(height * .021)}">${escapeXml(citedValues[0].label)}</text>`
       : "";
-    const evidencePanel = citedValues.length === 0 && (beat.sourceVisual.kind === "pdf_page" || beat.sourceVisual.kind === "pdf_highlight_crop" || beat.sourceVisual.kind === "ocr_page_card")
-      ? `<rect x="${width * 0.5}" y="${height * 0.16}" width="${width * 0.43}" height="${height * 0.5}" rx="${height * 0.022}" fill="#07110e" fill-opacity=".9" stroke="#75eaa5" stroke-opacity=".5"/><text x="${width * .54}" y="${height * .22}" fill="#75eaa5" font-family="Arial" font-size="${Math.round(height * .019)}" font-weight="800" letter-spacing="2">VERBATIM EVIDENCE</text>${textLines(excerptLines, width * .54, height * .285, Math.round(height * .026), 1.34, "#f4f7f5", 500)}`
+    const evidencePanel = !hasSourceCard && citedValues.length === 0 && (hasDocumentPage || beat.kind === "composite")
+      ? `<rect x="${panelX - width * .025}" y="${height * (portrait ? .49 : .14)}" width="${panelWidth + width * .05}" height="${height * (portrait ? .34 : .65)}" rx="${scale * .018}" fill="#07110e" fill-opacity=".9"/>
+        ${editorialTextSvg(evidenceTitle, panelX, height * (portrait ? .535 : .23), "#f4f7f5", 700, 1.15)}
+        ${editorialTextSvg(excerpt, panelX, height * (portrait ? .63 : .415), "#d9e3dd")}`
       : "";
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
       ${disclosure}
       ${evidencePanel}
       ${metricPanel}
-      <rect x="${width * 0.06}" y="${height * 0.9}" width="${width * 0.88}" height="${height * 0.052}" rx="${height * 0.012}" fill="#020607" fill-opacity=".76"/>
-      <text x="${width * 0.08}" y="${height * 0.933}" fill="#d9e3dd" font-family="Arial" font-size="${Math.round(height * 0.018)}" font-weight="700">${escapeXml(citation)} · ${escapeXml(beat.sourceVisual.locator)}</text>
+      ${hasSourceCard ? "" : `<rect x="${width * 0.06}" y="${height * 0.9}" width="${width * 0.88}" height="${height * 0.052}" rx="${height * 0.012}" fill="#020607" fill-opacity=".76"/>
+      ${editorialTextSvg(citationText, width * .08, height * .933, "#b8c7c0")}`}
     </svg>`;
     return sharp(outlineEditorialText(svg)).png().toBuffer();
   }
@@ -764,11 +779,11 @@ async function renderBeatOverlay(beat: VisualBeat, scene: NewsStoryboard["scenes
     <defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset=".35" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#020607" stop-opacity=".82"/></linearGradient></defs>
     <rect width="100%" height="100%" fill="url(#shade)"/>
     ${disclosure}
-    <rect x="${ruleX}" y="${height * 0.64}" width="${height * 0.008}" height="${height * 0.17}" rx="4" fill="#75eaa5"/>
-    <text x="${textX}" y="${height * 0.675}" fill="#75eaa5" font-family="Arial" font-size="${Math.round(height * 0.018)}" font-weight="700" letter-spacing="3">${escapeXml(kindLabel)}</text>
-    ${textLines(directedTitleLines, textX, height * 0.735, Math.round(height * (job.aspectRatio === "9:16" ? 0.047 : 0.055)), 1.05, "#f4f7f5", 800)}
+    <rect x="${ruleX}" y="${height * 0.64}" width="${height * 0.008}" height="${height * 0.17}" rx="4" fill="${escapeXml(accent)}"/>
+    <text x="${textX}" y="${height * 0.675}" fill="${escapeXml(accent)}" font-family="Arial" font-size="${Math.round(height * 0.018)}" font-weight="700" letter-spacing="3">${escapeXml(kindLabel)}</text>
+    ${editorialTextSvg(directedTitle, textX, height * .725, "#f4f7f5", 700, 1.12)}
     <rect x="${width * 0.065}" y="${height * 0.91}" width="${width * 0.87}" height="${height * 0.052}" rx="${height * 0.016}" fill="#07110e" fill-opacity=".76" stroke="#ffffff" stroke-opacity=".12"/>
-    <text x="${width * 0.085}" y="${height * 0.943}" fill="#b8c7c0" font-family="Arial" font-size="${Math.round(height * 0.017)}">${escapeXml(sourceLabel ? `Sources: ${sourceLabel}` : "Editorial visualization · Cocoa Director")}</text>
+    ${editorialTextSvg(fitEditorialText(sourceLabel ? `Sources: ${sourceLabel}` : "Editorial visualization · Cocoa Director", width * .82, Math.min(width, height) * .021, 1), width * .085, height * .943, "#b8c7c0")}
   </svg>`;
   return sharp(outlineEditorialText(svg)).png().toBuffer();
 }
@@ -1128,31 +1143,7 @@ function assTime(milliseconds: number) {
 }
 
 function escapeAss(value: string) { return value.replace(/\\/g, "\\\\").replace(/[{}]/g, "").replace(/\n/g, "\\N"); }
-function textLines(lines: string[], x: number, y: number, size: number, leading: number, fill: string, weight: number) { return lines.map((line, index) => `<text x="${x}" y="${y + index * size * leading}" fill="${fill}" font-family="Arial, sans-serif" font-size="${size}" font-weight="${weight}">${escapeXml(line)}</text>`).join(""); }
-function wrapText(value: string, columns: number) { const words = value.replace(/\s+/g, " ").trim().split(" "); const lines: string[] = []; let line = ""; for (const word of words) { if (`${line} ${word}`.trim().length > columns && line) { lines.push(line); line = word; } else line = `${line} ${word}`.trim(); } if (line) lines.push(line); return lines; }
 function beatKindLabel(kind: VisualBeat["kind"]) { return ({ documentary_source: "DOCUMENTARY SOURCE", document_excerpt: "SOURCE DOCUMENT", data_visualization: "DATA & CONTEXT", editorial_image: "EDITORIAL ILLUSTRATION", cinematic_broll: "CINEMATIC CONTEXT", synthetic_reenactment: "SYNTHETIC REENACTMENT", composite: "CINEMATIC EXPLAINER" })[kind]; }
-function sourceVisualSvg(beat: VisualBeat, width: number, height: number, colors: string[]) {
-  const source = beat.sourceVisual!;
-  const evidenceDetail = beat.index > 0;
-  const titleLines = wrapText(source.title, width > height ? 50 : 28).slice(0, 3);
-  const excerptLines = wrapText(`“${source.excerpt}”`, evidenceDetail ? (width > height ? 52 : 27) : (width > height ? 68 : 34)).slice(0, evidenceDetail ? 9 : 7);
-  const publisher = source.domain ?? (source.kind.startsWith("pdf") ? "SOURCE DOCUMENT" : "VERBATIM SOURCE EXCERPT");
-  const date = source.publishedAt ? ` · ${new Date(source.publishedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}` : "";
-  const accent = colors[2] ?? "#75eaa5";
-  const warm = colors[3] ?? "#d8a75d";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
-    <defs><linearGradient id="source-bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors[0] ?? "#07110e"}"/><stop offset="1" stop-color="${colors[1] ?? "#15233a"}"/></linearGradient><filter id="source-shadow"><feDropShadow dx="0" dy="18" stdDeviation="18" flood-opacity=".35"/></filter></defs>
-    <rect width="100%" height="100%" fill="url(#source-bg)"/>
-    <circle cx="${width * .83}" cy="${height * .15}" r="${height * .25}" fill="${accent}" opacity=".1"/>
-    <rect x="${width * .08}" y="${height * .1}" width="${width * .84}" height="${height * .73}" rx="${height * .025}" fill="#f4f3ed" filter="url(#source-shadow)"/>
-    <rect x="${width * .08}" y="${height * .1}" width="${width * .84}" height="${height * .075}" rx="${height * .025}" fill="${evidenceDetail ? warm : accent}"/>
-    <text x="${width * .12}" y="${height * .148}" fill="#07110e" font-family="Arial" font-size="${Math.round(height * .021)}" font-weight="800" letter-spacing="2">${escapeXml(evidenceDetail ? "EVIDENCE DETAIL" : publisher.toUpperCase())}${escapeXml(date)}</text>
-    ${evidenceDetail ? `<text x="${width * .12}" y="${height * .235}" fill="#53615b" font-family="Arial" font-size="${Math.round(height * .023)}" font-weight="700">${escapeXml(publisher.toUpperCase())}</text>` : textLines(titleLines, width * .12, height * .245, Math.round(height * .046), 1.08, "#101814", 800)}
-    <rect x="${width * .12}" y="${height * (evidenceDetail ? .29 : .41)}" width="${width * .015}" height="${height * (evidenceDetail ? .39 : .25)}" rx="4" fill="${evidenceDetail ? accent : warm}"/>
-    ${textLines(excerptLines, width * .17, height * (evidenceDetail ? .325 : .445), Math.round(height * (evidenceDetail ? .034 : .027)), evidenceDetail ? 1.25 : 1.32, "#27312d", evidenceDetail ? 650 : 500)}
-    <text x="${width * .12}" y="${height * .765}" fill="#53615b" font-family="Arial" font-size="${Math.round(height * .018)}" font-weight="700">${escapeXml(source.locator)} · VERIFIED EXCERPT ${escapeXml(source.excerptHash.slice(0, 10))}</text>
-  </svg>`;
-}
 function semanticGraphicSvg(beat: VisualBeat, width: number, height: number, colors: string[]) {
   const accent = colors[2] ?? "#75eaa5";
   const warm = colors[3] ?? "#d8a75d";
@@ -1232,14 +1223,15 @@ function dimensions(aspectRatio: VideoJob["aspectRatio"], premium: boolean) { if
 function escapeXml(value: string) { return value.replace(/[<>&"']/g, (character) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;" })[character] ?? character); }
 function longestExplicitHold(plan: HybridVisualPlanV2) { return plan.beats.filter((beat) => beat.hold).reduce((longest, beat) => Math.max(longest, beat.endMs - beat.startMs), 0); }
 async function fetchMedia(url: string) { const response = await fetchBlobUrl(url); if (!response.ok) throw new Error(`Could not fetch visual asset: HTTP ${response.status}`); return Buffer.from(await response.arrayBuffer()); }
-export async function fitEditorialDocumentPage(page: Buffer, width: number, height: number) {
+export async function fitEditorialDocumentPage(page: Buffer, width: number, height: number, background = "#07110e") {
   // Keep the full source page in the evidence pane. Filling a widescreen frame by
   // cropping a portrait PDF can remove all of its text before the overlay is added.
-  const fitted = await sharp(page).resize(Math.round(width * 0.36), Math.round(height * 0.72), {
+  const portrait = height > width;
+  const fitted = await sharp(page).resize(Math.round(width * (portrait ? .8 : .36)), Math.round(height * (portrait ? .34 : .72)), {
     fit: "inside", withoutEnlargement: false,
   }).png().toBuffer();
-  return sharp({ create: { width, height, channels: 3, background: "#e9eee9" } })
-    .composite([{ input: fitted, left: Math.round(width * 0.08), top: Math.round(height * 0.1) }]).png().toBuffer();
+  return sharp({ create: { width, height, channels: 3, background } })
+    .composite([{ input: fitted, left: Math.round(width * (portrait ? .1 : .08)), top: Math.round(height * .1) }]).png().toBuffer();
 }
 
 export async function compositeEditorialThumbnail(base: Buffer, overlay: Buffer) {

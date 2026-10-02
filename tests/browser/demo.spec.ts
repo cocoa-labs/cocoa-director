@@ -154,6 +154,41 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   expect(errors).toEqual([]);
 });
 
+test("explainer teaches the supplied body and preserves citations through export", async ({ page }, info) => {
+  test.setTimeout(420_000);
+  await page.goto("/");
+  await page.getByRole("button", { name: /Explainer Source-first/ }).click();
+  await page.getByLabel("Production brief", { exact: true }).fill("Explain how the supplied rain garden design works, including its limits and practical conclusion.");
+  await page.getByRole("button", { name: "Continue to sources", exact: true }).click();
+  await page.getByPlaceholder("Text source title (optional)").fill("Rain garden study");
+  await page.locator("#source-text").fill(`Authors: Example Research Group\nSubmitted on 1 October 2026\nView a PDF of the paper titled Rain garden study\nAbstract:\nA rain garden is a shallow planted basin that receives runoff from a roof, driveway, or paved path during rain.\nWater entering the basin spreads across the planted surface, giving the temporary pool time to soak slowly into the soil.\nPlant roots help maintain spaces in the soil, while stems and leaves slow moving water as it enters the basin.\nThe design uses plants suited to the local soil and climate, and young plants need regular care as they establish.\nThe basin needs a safe overflow route because storms larger than its designed capacity can send excess water beyond it.\nConclusion\nThe practical takeaway is to combine suitable planting with a safe overflow route, so the garden works within its designed limits.`);
+  await page.getByRole("button", { name: "Add text source", exact: true }).click();
+  await page.getByRole("button", { name: "Continue to direction", exact: true }).click();
+  await page.getByLabel("Quality tier", { exact: true }).selectOption("draft");
+  await page.getByRole("button", { name: "Continue to review", exact: true }).click();
+  await page.getByRole("button", { name: /^Create Draft/ }).click();
+  await expect(page.getByRole("button", { name: /^(Approve script|Condense to|Fit to)/ })).toBeVisible();
+  const id = new URL(page.url()).searchParams.get("production")!;
+  const draft = await (await page.request.get(`/api/productions/${id}`)).json();
+  expect(draft.job.script).toContain("practical takeaway");
+  expect(draft.job.script).not.toMatch(/Authors:|Submitted on|View a PDF/);
+  const fit = page.getByRole("button", { name: /^(Condense to|Fit to)/ });
+  if (await fit.isVisible()) await fit.click();
+  await page.getByRole("button", { name: "Approve script", exact: true }).click();
+  const approved = page.waitForResponse((response) => response.url().endsWith("/approvals") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
+  expect((await approved).ok()).toBe(true);
+  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`)).json()).state, { timeout: 300_000 }).toBe("complete");
+  const output = await (await page.request.get(`/api/productions/${id}`)).json();
+  expect(output.job.contentType).toBe("explainer");
+  expect(output.job.sourceBundle.claims.every((claim: { evidenceRefs: unknown[] }) => claim.evidenceRefs.length > 0)).toBe(true);
+  expect((await page.request.get(output.delivery.urls.sourceManifestJson)).ok()).toBe(true);
+  expect((await page.request.get(`/api/videos/${id}/download`)).ok()).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(2);
+  await page.screenshot({ path: info.outputPath("explainer-narrow.png"), fullPage: true });
+});
+
 function demoPdf() {
   const text = "Synthetic garden report. Volunteers planted forty beds. The demonstration source describes community participation and seasonal planting plans. This document contains no private information.";
   const stream = `BT /F1 12 Tf 40 740 Td (${text}) Tj ET`;
