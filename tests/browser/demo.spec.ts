@@ -186,6 +186,10 @@ test("explainer teaches the supplied body and preserves citations through export
   expect(output.job.sourceBundle.claims.every((claim: { evidenceRefs: unknown[] }) => claim.evidenceRefs.length > 0)).toBe(true);
   expect((await page.request.get(output.delivery.urls.sourceManifestJson)).ok()).toBe(true);
   expect((await page.request.get(`/api/videos/${id}/download`)).ok()).toBe(true);
+  await expect(page.locator(".top-pipeline")).toContainText("Phase 11 of 11");
+  await expect(page.locator(".top-pipeline")).toContainText("Final validation");
+  await expect(page.getByRole("tab", { name: "Pipeline 11/11", exact: true })).toBeVisible();
+  await expect(page.locator(".compact-run-meta")).toContainText("Phase 11/11");
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(2);
   await page.screenshot({ path: info.outputPath("explainer-narrow.png"), fullPage: true });

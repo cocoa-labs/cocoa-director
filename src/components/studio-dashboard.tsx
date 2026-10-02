@@ -2789,7 +2789,7 @@ export function StudioDashboard({
                 {
                   id: "pipeline",
                   label: "Pipeline",
-                  badge: currentJob ? `${currentJob.currentPhase}/9` : undefined,
+                  badge: currentJob ? pipelinePhaseBadge(currentJob, productionProgress ?? undefined) : undefined,
                   content: <PhaseTimeline current={job?.currentPhase ?? 0} currentJob={currentJob} progress={productionProgress ?? undefined} />,
                 },
                 {
@@ -4836,13 +4836,7 @@ function DirectorOutputCard({ output }: { output: DirectorOutput }) {
 
 function TopPipeline({ current, currentJob, progress }: { current: number; currentJob?: VideoJob; progress?: ProductionProgressSnapshot }) {
   const records = progress ? progressRecords(progress) : pipelineRecords(currentJob);
-  // Editorial workflows use named steps; their legacy music phase stays at 1.
-  const editorialActive = currentJob && ["explainer", "news_digest"].includes(currentJob.contentType ?? "")
-    ? records.findIndex((record) => record.state === "running" || record.state === "awaiting_user" || record.state === "failed")
-    : -1;
-  const activeIndex = Math.max(0, editorialActive >= 0 ? editorialActive : records.findIndex((record, index) => (
-    record.state === "running" || record.state === "awaiting_user" || record.state === "failed" || current === index + 1
-  )));
+  const activeIndex = activePipelineIndex(records, currentJob, current);
   const activeRecord = records[activeIndex] ?? records[0];
   return (
     <div className="top-pipeline" aria-label="Pipeline">
@@ -4936,7 +4930,7 @@ function SystemDock({ job }: { job?: VideoJob }) {
       <div>
         <Gauge className="h-4 w-4 text-accent-2" aria-hidden />
         <span>Queue</span>
-        <strong>{job ? `phase ${job.currentPhase}` : "clear"}</strong>
+        <strong>{job && ["explainer", "news_digest"].includes(job.contentType ?? "") ? job.status === "complete" ? "complete" : currentWorkflowStep(job)?.name ?? "preparing" : job ? `phase ${job.currentPhase}` : "clear"}</strong>
       </div>
       <div>
         <SlidersHorizontal className="h-4 w-4 text-warm" aria-hidden />
@@ -5111,7 +5105,7 @@ function JobStatusCard({
       <div className="mt-3 flex flex-wrap gap-2 font-mono text-[11px] text-muted">
         <span className="rounded border border-line bg-background px-2 py-1">job {job.id.slice(0, 8)}</span>
         <span className="rounded border border-line bg-background px-2 py-1">
-          phase {job.currentPhase}/9
+          phase {pipelinePhaseBadge(job)}
         </span>
         {remaining ? (
           <span className="rounded border border-line bg-background px-2 py-1 text-accent">
@@ -5635,7 +5629,7 @@ function CompactRunSummary({ apiJob, progress }: { apiJob: ApiJob | null; progre
         <div className="compact-run-meta">
           {remaining ? <span>ETA {remaining}</span> : null}
           {totalUnits > 0 ? <span>{completedUnits}/{totalUnits} units ready</span> : null}
-          <span>Phase {job.currentPhase}/9</span>
+          <span>Phase {pipelinePhaseBadge(job, progress)}</span>
         </div>
       </div>
     </div>
@@ -8588,6 +8582,26 @@ function progressRecords(progress: ProductionProgressSnapshot) {
     completedAt: stage.completedAt,
     error: stage.failed > 0 ? stage.detail : undefined,
   }));
+}
+
+function activePipelineIndex(records: Array<{ state: string }>, job?: VideoJob, current = job?.currentPhase ?? 1) {
+  // Editorial workflows use named stages; their legacy music phase stays at 1.
+  if (job && ["explainer", "news_digest"].includes(job.contentType ?? "")) {
+    if (job.status === "complete") return Math.max(0, records.length - 1);
+    const active = records.findIndex((record) => ["running", "awaiting_user", "failed"].includes(record.state));
+    if (active >= 0) return active;
+    const pending = records.findIndex((record) => record.state === "pending");
+    return pending >= 0 ? pending : Math.max(0, records.length - 1);
+  }
+  return Math.max(0, records.findIndex((record, index) => (
+    record.state === "running" || record.state === "awaiting_user" || record.state === "failed" || current === index + 1
+  )));
+}
+
+function pipelinePhaseBadge(job: VideoJob, progress?: ProductionProgressSnapshot) {
+  if (!["explainer", "news_digest"].includes(job.contentType ?? "")) return `${job.currentPhase}/9`;
+  const records = progress ? progressRecords(progress) : pipelineRecords(job);
+  return `${activePipelineIndex(records, job) + 1}/${records.length}`;
 }
 
 function progressHealthLabel(state: ProductionProgressSnapshot["state"]) {
