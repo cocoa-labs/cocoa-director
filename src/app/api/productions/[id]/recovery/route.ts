@@ -183,11 +183,14 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
       return NextResponse.json({ productionId: id, runId: run.runId, resumed: true, progress: await getProductionProgress(id) }, { status: 202 });
     }
 
-    const reconciled = await reconcileProductionForRecovery(id);
-    const requestedBeatIds = body.beatIds.length > 0 ? body.beatIds : failures.map((failure) => failure.beatId);
-    if (requestedBeatIds.length === 0) return NextResponse.json({ error: "No failed cinematic beats require recovery." }, { status: 409 });
-    const estimatedCostCents = requestedBeatIds.reduce((sum, beatId) => sum + (reconciled.visualPlan?.beats.find((beat) => beat.id === beatId)?.costEstimateCents ?? 0), 0);
-    const remainingReserve = Math.max(0, reconciled.recoveryBudgetCents - reconciled.recoverySpentCents);
+    // Reject stale/successful selections before reserving budget or resetting steps.
+    const failedBeatIds = new Set(failures.map((failure) => failure.beatId));
+    const currentBeatIds = new Set(auth.job.visualPlan?.beats.map((beat) => beat.id));
+    const requestedBeatIds = [...new Set(body.beatIds.length > 0 ? body.beatIds : failures.map((failure) => failure.beatId))]
+      .filter((beatId) => failedBeatIds.has(beatId) && currentBeatIds.has(beatId));
+    if (requestedBeatIds.length === 0) return NextResponse.json({ error: "No failed visual beats require recovery.", code: "no_failed_visuals" }, { status: 409 });
+    const estimatedCostCents = requestedBeatIds.reduce((sum, beatId) => sum + (auth.job.visualPlan?.beats.find((beat) => beat.id === beatId)?.costEstimateCents ?? 0), 0);
+    const remainingReserve = Math.max(0, auth.job.recoveryBudgetCents - auth.job.recoverySpentCents);
     if (estimatedCostCents > remainingReserve && !body.confirmSpend) {
       return NextResponse.json({
         error: `Recovery requires $${(estimatedCostCents / 100).toFixed(2)}; confirm the incremental spend to continue.`,
@@ -203,12 +206,13 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
       estimatedCostCents: body.confirmSpend ? editorialRecoveryAllowanceCents(estimatedCostCents) : 0,
       allowanceMode: body.confirmSpend ? "remaining" : undefined,
       idempotencyKey,
-      job: reconciled,
+      job: auth.job,
       metadata: { requestedBeatIds, recoveryAction: body.action, existingSuccessfulAssets: media.assets.length },
       user: auth.user,
     });
     if (guard.replayed) return NextResponse.json({ productionId: id, replayed: true, progress: await getProductionProgress(id) });
 
+    const reconciled = await reconcileProductionForRecovery(id);
     const authorization = await authorizeIdentitySafeRecovery(id, failures, {
       explicit: true,
       confirmSpend: body.confirmSpend,

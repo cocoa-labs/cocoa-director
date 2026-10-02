@@ -49,7 +49,7 @@ export async function prepareHybridVisualBeat(
   if (latestDesired?.status === "success" && !options.forceRegenerate) return latestDesired;
   if (latestDesired?.status === "failed" && !options.identitySafe && !options.retryFailed) return latestDesired;
 
-  const imageSuffix = options.forceRegenerate ? `:polish:r${attempt}` : options.identitySafe ? `:safe:r${attempt}` : "";
+  const imageSuffix = options.forceRegenerate ? `:polish:r${attempt}` : options.identitySafe ? `:safe:r${attempt}` : options.retryFailed ? `:retry:r${attempt}` : "";
   const videoSuffix = options.forceRegenerate ? `:polish:r${attempt}` : options.identitySafe ? `:safe:r${attempt}` : options.retryFailed ? `:retry:r${attempt}` : "";
   const imageKey = `${generationKey(videoId, beat.id, "image")}${imageSuffix}`;
   let imageGeneration = findGeneration(media.generations, imageKey);

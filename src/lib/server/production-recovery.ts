@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import type { GraphicFamily, HybridVisualPlanV2, MediaGeneration } from "@/lib/schemas";
 import type { HybridAssetState } from "@/lib/server/hybrid-assets";
 import { attachVisualPlanToStoryboard, buildHybridVisualPlan } from "@/lib/hybrid-visuals";
+import { editorialNarrationTiming } from "@/lib/editorial-narration";
+import { workflowProfileFor } from "@/lib/production";
 import { copyRemoteFileToBlob } from "@/lib/server/blob";
 import { isHybridSafeRecoveryEnabled } from "@/lib/server/config";
 import { probeMediaUrl } from "@/lib/server/media-probe";
@@ -431,17 +433,19 @@ export async function reconcileProductionForRecovery(productionId: string) {
   const media = await store.listJobMedia(productionId);
   const failed = latestFailedVisuals(media.generations);
   const now = new Date().toISOString();
+  const narration = editorialNarrationTiming(reconciled);
   const steps = editorialStepsFor(reconciled).map((step) => {
+    if (step.id === "narration" && narration.measured && !narration.requiresRevision) return { ...step, state: "complete" as const, completedAt: step.completedAt ?? reconciled.visualPlan?.timingPlan?.compiledAt, error: undefined };
     if (step.id === "imagery") return { ...step, state: "complete" as const, completedAt: step.completedAt ?? now, error: undefined };
     if (step.id === "generation") return { ...step, state: "awaiting_user" as const, error: failed.map((item) => `${item.beatId}: ${item.error}`).join(" ") };
-    if (["narration", "visual_rough_cut_qa", "timeline", "preflight_qa", "render", "final_qa"].includes(step.id)) return { ...step, state: "pending" as const, startedAt: undefined, completedAt: undefined, error: undefined };
+    if (["visual_rough_cut_qa", "timeline", "preflight_qa", "render", "final_qa"].includes(step.id)) return { ...step, state: "pending" as const, startedAt: undefined, completedAt: undefined, error: undefined };
     return step;
   });
   return store.updateJob(productionId, {
-    workflowVersion: reconciled.contentType === "explainer" ? "explainer-v4" : "news-digest-v5",
+    workflowVersion: workflowProfileFor(reconciled.contentType ?? "news_digest").id,
     status: failed.length > 0 ? "awaiting_user" : reconciled.status,
     workflowSteps: steps,
-    error: failed.length > 0 ? `${failed.length} cinematic beat${failed.length === 1 ? "" : "s"} need safe recovery.` : reconciled.error,
+    error: failed.length > 0 ? `${failed.length} visual beat${failed.length === 1 ? " needs" : "s need"} recovery.` : reconciled.error,
   });
 }
 
@@ -479,7 +483,7 @@ export function latestFailedVisuals(generations: Awaited<ReturnType<ReturnType<t
   const latest = new Map<string, typeof generations[number]>();
   for (const generation of [...generations].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))) {
     const beatId = typeof generation.controls.visualBeatId === "string" ? generation.controls.visualBeatId : undefined;
-    if (!beatId || generation.kind !== "video" || latest.has(beatId)) continue;
+    if (!beatId || (generation.kind !== "video" && generation.kind !== "image") || latest.has(beatId)) continue;
     latest.set(beatId, generation);
   }
   return [...latest.entries()].flatMap(([beatId, generation]) => generation.status === "failed" ? [{
