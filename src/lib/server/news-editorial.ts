@@ -1,18 +1,32 @@
 import { editorialNarrationTiming } from "@/lib/editorial-narration";
+import { makeDurationPlan, usesNaturalDuration } from "@/lib/editorial-duration";
+import { naturalEditorialAllowance } from "@/lib/editorial-costs";
 import { criticalSection } from "@/lib/server/critical-section";
 import { ApiRequestError } from "@/lib/server/api-error";
 import { randomUUID } from "node:crypto";
 
 import type { HybridVisualPlanV2, NewsStoryboard, SourceClaim, VideoJob, VisualStylePreset, WorkflowStep } from "@/lib/schemas";
 import { validateTimeline } from "@/lib/production";
-import { spokenScriptText } from "@/lib/editorial-timing";
+import { spokenScriptText, applyTimingPlan, compileNaturalEditorialTiming } from "@/lib/editorial-timing";
 import { applyValidatedLikenessRouting, narrationBudgetSummary, recalculateHybridVisualPlan } from "@/lib/hybrid-visuals";
 import type { UserContext } from "@/lib/server/auth";
 import { isCinematicReenactmentsEnabled, isHybridSafeRecoveryEnabled, isHybridVisualsV2Enabled, isHybridWorkflowV4Enabled, isLikenessLiveValidated, isLikenessVideoEnabled } from "@/lib/server/config";
 import { getStore } from "@/lib/server/store";
 import { validateGraphicPayload } from "@/lib/server/source-visuals";
+import { readableEditorialMessage } from "@/lib/server/editorial-graphics";
 
 export type NewsGate = "script" | "storyboard";
+
+export function assertDurationProposal(job: VideoJob, acceptedSeconds?: number) {
+  if (!usesNaturalDuration(job)) return;
+  if (job.durationPlan?.scopeTooLong || job.durationSeconds > 600) throw new ApiRequestError("This outline exceeds ten minutes. Narrow the scope before generating media.", 409, "duration_scope_too_long");
+  if (acceptedSeconds !== job.durationSeconds) throw new ApiRequestError("Review and accept the current runtime and cost before generating media.", 409, "duration_review_required");
+}
+
+export function assertEditorialStoryboardReady(job: VideoJob) {
+  const blockers = storyboardBlockers(job);
+  if (blockers.length) throw new ApiRequestError(blockers.join(" "), 409, "approval_blocked");
+}
 
 export async function invalidateNewsAfterSourceChange(productionId?: string, source?: { id: string; projectId: string }) {
   const store = getStore();
@@ -25,6 +39,7 @@ export async function invalidateNewsAfterSourceChange(productionId?: string, sou
       return {
         approvals: [], workflowSteps: resetFrom(job.workflowSteps ?? [], resetIds), status: "awaiting_user",
         editorialPlan: undefined, storyboard: undefined, script: undefined, timelineManifest: undefined,
+        durationPlan: job.durationPlan ? { ...job.durationPlan, needsReview: true, approvedDurationSeconds: undefined, approvedCostCents: undefined } : undefined,
         qaReport: undefined, narrationAssetId: undefined,
         error: "Sources changed. Regenerate the cited editorial draft before approval.",
       };
@@ -38,6 +53,7 @@ export async function approveNewsGate(input: {
   gate: NewsGate;
   artifactVersionId: string;
   confirmSpend?: boolean;
+  acceptedDurationSeconds?: number;
 }) {
   const { gate } = input;
   let launch = false;
@@ -56,6 +72,7 @@ export async function approveNewsGate(input: {
   const blockers = gate === "script" ? scriptBlockers(job) : storyboardBlockers(job);
   if (blockers.length > 0) throw new ApiRequestError(blockers.join(" "), 409, "approval_blocked");
   if (gate === "storyboard") {
+    assertDurationProposal(job, input.acceptedDurationSeconds);
     const activeScriptVersion = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId;
     const scriptApproved = job.approvals?.some((approval) => approval.gate === "script" && approval.artifactVersionId === activeScriptVersion);
     if (!scriptApproved) throw new Error("Approve the current cited script before approving the storyboard.");
@@ -67,7 +84,9 @@ export async function approveNewsGate(input: {
   const approvals = [...(job.approvals ?? []).filter((item) => item.gate !== gate), approval];
   const workflowSteps = advanceApprovalSteps(job.workflowSteps ?? [], gate, now);
   launch = gate === "storyboard";
-  return { approvals, workflowSteps, status: gate === "storyboard" ? "running" : "awaiting_user", error: undefined };
+  return { approvals, workflowSteps,
+    ...(gate === "storyboard" && usesNaturalDuration(job) && job.durationPlan ? { durationPlan: { ...job.durationPlan, needsReview: false, approvedDurationSeconds: job.durationSeconds, approvedCostCents: job.estimatedCostCents + job.recoveryBudgetCents, updatedAt: now } } : {}),
+    status: gate === "storyboard" ? "running" : "awaiting_user", error: undefined };
   }));
   if (launch) await startApprovedEditorialGeneration(input.job.id);
   return updated;
@@ -84,6 +103,7 @@ export async function updateNewsDraft(input: {
   return criticalSection(`editorial:${input.job.projectId}`, () => getStore().mutateJob(input.job.id, (job) => {
   if (job.status === "running") throw new ApiRequestError("Wait for this run to finish before editing its approved draft.", 409, "production_running");
   if (job.updatedAt !== input.job.updatedAt) throw new ApiRequestError("This draft changed. Reload it before saving.", 409, "stale_draft");
+  if (input.script === job.script && input.script !== undefined && !input.claims && !input.storyboard && !input.visualPlan && !input.visualStylePreset) return {};
   if (job.contentType !== "news_digest" && job.contentType !== "explainer") throw new Error("Draft editing is only available for news and explainer productions.");
   const now = new Date().toISOString();
   const artifactVersions = [...job.artifactVersions];
@@ -100,11 +120,11 @@ export async function updateNewsDraft(input: {
     workflowSteps = setStepState(workflowSteps, "script_approval", "awaiting_user");
     approvals = [];
   }
-  const synchronizedStoryboard = input.script !== undefined && job.storyboard
+  let synchronizedStoryboard = input.script !== undefined && job.storyboard
     ? storyboardForEditedScript(input.script, input.storyboard ?? job.storyboard)
     : input.storyboard;
   const pacing = editorialNarrationTiming(job).pacing;
-  const visualPlan = input.visualPlan ? applyValidatedLikenessRouting(
+  let visualPlan = input.visualPlan ? applyValidatedLikenessRouting(
     recalculateHybridVisualPlan(input.visualPlan),
     isCinematicReenactmentsEnabled() && isLikenessVideoEnabled() && isLikenessLiveValidated(),
   ) : input.script !== undefined && job.visualPlan ? {
@@ -129,10 +149,23 @@ export async function updateNewsDraft(input: {
     workflowSteps = setStepState(workflowSteps, "script_approval", "awaiting_user");
   }
   const sourceBundle = input.claims ? { ...(job.sourceBundle ?? { inputs: [], claims: [] }), claims: input.claims } : job.sourceBundle;
+  let durationPlan = usesNaturalDuration(job) && job.durationPlan && sourceBundle && (synchronizedStoryboard || input.claims)
+    ? makeDurationPlan({ request: { durationMode: job.durationPlan.mode, voiceId: job.durationPlan.voiceId, excludedClaimIds: job.durationPlan.excludedClaimIds, targetDurationSeconds: job.durationPlan.requestedTargetSeconds ?? Math.min(600, job.durationSeconds) }, sourceBundle, scenes: (synchronizedStoryboard ?? job.storyboard)?.scenes ?? [], wordsPerSecond: pacing?.wordsPerSecond, now }) : job.durationPlan;
+  if (durationPlan && usesNaturalDuration(job) && synchronizedStoryboard && (visualPlan ?? job.visualPlan)) {
+    const estimatedTiming = compileNaturalEditorialTiming({ productionId: job.id, storyboard: synchronizedStoryboard, narration: synchronizedStoryboard.scenes.map((scene) => ({ sceneId: scene.id, durationMs: Math.max(1000, Math.round(scene.narration.split(/\s+/).length / (pacing?.wordsPerSecond ?? 2) * 1000)) })), compiledAt: now });
+    const timed = applyTimingPlan(synchronizedStoryboard, (visualPlan ?? job.visualPlan)!, estimatedTiming);
+    synchronizedStoryboard = timed.storyboard;
+    visualPlan = { ...recalculateHybridVisualPlan(timed.plan), timingPlan: undefined };
+    durationPlan = { ...durationPlan, estimatedDurationSeconds: estimatedTiming.targetDurationMs / 1000, scopeTooLong: estimatedTiming.targetDurationMs > 600_000 };
+    const artifact = artifactVersions.find((version) => version.id === storyboardVersionId);
+    if (artifact) artifact.payload = { storyboard: synchronizedStoryboard, visualPlan };
+  }
   const qaReport = job.timelineManifest
     ? validateTimeline({ timeline: job.timelineManifest, sourceBundle, checkedAt: now })
     : job.qaReport;
   return {
+    durationPlan,
+    ...(durationPlan && synchronizedStoryboard ? { durationSeconds: durationPlan.estimatedDurationSeconds, timelineManifest: undefined, finalVideoUrl: undefined } : {}),
     ...(input.script !== undefined ? { script: input.script } : {}),
     ...(synchronizedStoryboard !== undefined ? { storyboard: synchronizedStoryboard, editorialPlan: job.editorialPlan ? { ...job.editorialPlan, scenes: synchronizedStoryboard.scenes } : undefined } : {}),
     ...(visualPlan !== undefined ? { visualPlan } : {}),
@@ -141,6 +174,7 @@ export async function updateNewsDraft(input: {
       recoveryBudgetCents: isHybridSafeRecoveryEnabled() ? Math.ceil(visualPlan.metrics.estimatedCostCents * 0.15) : 0,
       recoverySpentCents: 0,
     } : {}),
+    ...(durationPlan && visualPlan ? { estimatedCostCents: naturalEditorialAllowance({ plan: visualPlan, aspectRatio: job.aspectRatio, durationSeconds: durationPlan.estimatedDurationSeconds, narration: (synchronizedStoryboard ?? job.storyboard)?.scenes.map((scene) => scene.narration) }), recoveryBudgetCents: Math.ceil(visualPlan.metrics.estimatedCostCents * .15) } : {}),
     ...(input.visualStylePreset !== undefined ? { visualStylePreset: input.visualStylePreset } : {}),
     sourceBundle,
     qaReport,
@@ -169,6 +203,7 @@ function storyboardForEditedScript(script: string, storyboard: NewsStoryboard): 
 
 function scriptBlockers(job: VideoJob) {
   const blockers: string[] = [];
+  if (usesNaturalDuration(job) && job.durationPlan?.scopeTooLong) blockers.push("The complete outline exceeds ten minutes. Narrow its scope before generating media; your outline is saved.");
   // The versioned script is the approval artifact and therefore the authoritative
   // input for this gate. Storyboard narration is rebuilt from the fitted script before
   // the storyboard gate and must not make a corrected script appear permanently stale.
@@ -219,6 +254,11 @@ function storyboardBlockers(job: VideoJob) {
   const cinematic = job.visualPlan?.beats.filter((beat) => ["cinematic_broll", "synthetic_reenactment", "composite"].includes(beat.kind)) ?? [];
   if (job.qualityTier !== "draft" && cinematic.length === 0) blockers.push("Standard and Premium storyboards require cinematic visual beats.");
   for (const beat of job.visualPlan?.beats ?? []) {
+    if (usesNaturalDuration(job)) {
+      const scene = job.storyboard?.scenes.find((scene) => scene.id === beat.sceneId);
+      try { readableEditorialMessage(scene?.title ?? "Key idea", beat.sourceVisual?.excerpt, beat.endMs - beat.startMs); }
+      catch (error) { blockers.push(error instanceof Error ? error.message : "Shorten the primary on-screen message for comfortable reading."); }
+    }
     if (beat.kind === "synthetic_reenactment") {
       if (!isCinematicReenactmentsEnabled()) blockers.push(`Synthetic reenactment ${beat.id} is disabled for this deployment.`);
       if (!beat.disclosure.required || !beat.disclosure.persistent || !beat.disclosure.label) blockers.push(`Synthetic reenactment ${beat.id} requires a persistent disclosure label.`);

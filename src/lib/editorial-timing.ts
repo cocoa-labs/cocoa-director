@@ -6,6 +6,7 @@ import type {
   VisualBeat,
 } from "@/lib/schemas";
 import { MAX_EDITORIAL_NARRATION_RATE, MIN_EDITORIAL_NARRATION_RATE } from "@/lib/editorial-pacing";
+import { EDITORIAL_ENDING_MS, EDITORIAL_TRANSITION_MS } from "@/lib/editorial-duration";
 
 const MIN_COVERAGE = 0.75;
 const MAX_COVERAGE = 0.92;
@@ -23,6 +24,31 @@ export type MeasuredNarration = {
   sceneId: string;
   durationMs: number;
 };
+
+/** Natural narration is never sped up or cut to satisfy a rounded time hint. */
+export function compileNaturalEditorialTiming(input: {
+  productionId: string; scriptVersionId?: string; storyboard: NewsStoryboard;
+  narration: MeasuredNarration[]; compiledAt: string;
+}): EditorialTimingPlan {
+  const measured = new Map(input.narration.map((take) => [take.sceneId, take.durationMs]));
+  const scenes: EditorialTimingPlan["scenes"] = [];
+  const pauses: EditorialTimingPlan["pauses"] = [];
+  let cursor = 0;
+  for (const [index, scene] of input.storyboard.scenes.entries()) {
+    const duration = measured.get(scene.id);
+    if (!duration || !Number.isFinite(duration)) throw new Error(`Measured narration is missing for ${scene.id}.`);
+    const last = index === input.storyboard.scenes.length - 1;
+    const speechEndMs = cursor + Math.round(duration);
+    const endMs = last ? Math.ceil((speechEndMs + EDITORIAL_ENDING_MS) / 1_000) * 1_000 : speechEndMs + EDITORIAL_TRANSITION_MS;
+    const pauseAfterId = `pause-${scene.id}`;
+    scenes.push({ sceneId: scene.id, startMs: cursor, speechStartMs: cursor, speechEndMs, endMs, measuredNarrationMs: Math.round(duration), retimeRate: 1, pauseAfterId });
+    pauses.push({ id: pauseAfterId, afterSceneId: scene.id, startMs: speechEndMs, endMs, durationMs: endMs - speechEndMs, kind: last ? "ending" : "transition", reason: last ? "Hold the closing takeaway after the complete narration" : "Natural transition breath", approved: true });
+    cursor = endMs;
+  }
+  const spokenDurationMs = scenes.reduce((sum, scene) => sum + scene.measuredNarrationMs, 0);
+  return { version: 3, productionId: input.productionId, scriptVersionId: input.scriptVersionId, targetDurationMs: cursor, scenes, pauses,
+    coverage: { version: 1, targetDurationMs: cursor, spokenDurationMs, spokenCoverage: spokenDurationMs / cursor, longestUnapprovedGapMs: 0, passed: true, findings: [] }, compiledAt: input.compiledAt };
+}
 
 /** Scene headings are presentation metadata, not words the narrator speaks. */
 export function spokenScriptText(script: string, sceneTitles: string[]) {
@@ -162,7 +188,7 @@ export function applyTimingPlan(storyboard: NewsStoryboard, plan: HybridVisualPl
     if (!measured) return scene;
     return { ...scene, startMs: measured.startMs, endMs: measured.endMs };
   });
-  const normalized = normalizeEditorialVisualBeats({ ...plan, version: 4 as const }, scenes);
+  const normalized = normalizeEditorialVisualBeats({ ...plan, version: 4 as const, timingPlan: timing, metrics: { ...plan.metrics, targetDurationMs: timing.targetDurationMs } }, scenes);
   return {
     storyboard: { ...storyboard, scenes },
     plan: {
@@ -181,7 +207,7 @@ export function applyTimingPlan(storyboard: NewsStoryboard, plan: HybridVisualPl
  */
 export function normalizeEditorialVisualBeats(
   plan: HybridVisualPlanV2,
-  scenes: Array<{ id: string; startMs: number; endMs: number }>,
+  scenes: Array<{ id: string; startMs: number; endMs: number; title?: string }>,
 ): HybridVisualPlanV2 {
   const sceneIds = new Set(scenes.map((scene) => scene.id));
   const normalized: VisualBeat[] = [];
@@ -192,11 +218,22 @@ export function normalizeEditorialVisualBeats(
       .sort((left, right) => left.startMs - right.startMs || left.index - right.index);
     if (candidates.length === 0) continue;
     const durationMs = Math.max(1, scene.endMs - scene.startMs);
+    const natural = plan.timingPlan?.version === 3;
+    // Additional time uses source graphics; completed generated assets remain
+    // attached to their original beat IDs and never become duplicate charges.
+    if (natural) {
+      const sourceBeat = candidates.find((beat) => INFORMATION_KINDS.has(beat.kind)) ?? candidates[0];
+      for (let index = candidates.length; index < Math.ceil(durationMs / MAX_VISUAL_BEAT_MS); index++) candidates.push({ ...sourceBeat,
+        id: `${scene.id}-natural-${index}`, index, kind: "documentary_source", assets: [], generationPrompt: undefined,
+        costEstimateCents: 0, fullScreen: false, hold: false,
+      });
+    }
     const minimumCount = Math.max(1, Math.ceil(durationMs / MAX_VISUAL_BEAT_MS));
-    const maximumCount = Math.max(1, Math.floor(durationMs / MIN_VISUAL_BEAT_MS));
+    const readingMs = natural ? Math.max(MIN_VISUAL_BEAT_MS, Math.ceil((scene.title?.split(/\s+/).filter(Boolean).length ?? 0) / 3 * 1000 + 360)) : MIN_VISUAL_BEAT_MS;
+    const maximumCount = Math.max(1, Math.floor(durationMs / readingMs));
     const targetCount = Math.min(candidates.length, Math.max(minimumCount, Math.min(maximumCount, candidates.length)));
     const selected = selectEditorialBeats(candidates, targetCount);
-    const durations = allocateVisualBeatDurations(selected, durationMs);
+    const durations = natural ? selected.map((_, index) => Math.round(durationMs * (index + 1) / selected.length) - Math.round(durationMs * index / selected.length)) : allocateVisualBeatDurations(selected, durationMs);
     let cursor = scene.startMs;
 
     for (let index = 0; index < selected.length; index += 1) {

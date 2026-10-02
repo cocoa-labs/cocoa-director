@@ -1,3 +1,4 @@
+import { editorialImageSize as imageSize } from "@/lib/editorial-costs";
 import type { HybridVisualPlanV2, MediaAsset, MediaGeneration, VideoJob, VisualBeat, VisualBeatAsset } from "@/lib/schemas";
 import { attachVisualPlanToStoryboard } from "@/lib/hybrid-visuals";
 import { getProviderMode } from "@/lib/server/config";
@@ -375,16 +376,6 @@ function providerDuration(beat: VisualBeat) {
   return Math.max(4, Math.min(15, Math.ceil((beat.endMs - beat.startMs) / 1_000)));
 }
 
-function imageSize(aspectRatio: VideoJob["aspectRatio"], qualityTier: VideoJob["qualityTier"]) {
-  if (qualityTier === "premium") {
-    if (aspectRatio === "9:16") return "2160x3840";
-    if (aspectRatio === "1:1") return "2048x2048";
-    return "3840x2160";
-  }
-  if (aspectRatio === "9:16") return "1024x1536";
-  if (aspectRatio === "1:1") return "1024x1024";
-  return "1536x1024";
-}
 
 async function requireHybridJob(videoId: string) {
   const job = await getStore().getJob(videoId);

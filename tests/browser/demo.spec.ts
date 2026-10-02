@@ -28,15 +28,16 @@ test("music autopilot, playback, artifact download and project recovery", async 
   await page.getByRole("button", { name: /^Make Video/ }).click();
   expect((await submitted).ok()).toBe(true);
   await expect(page).toHaveURL(/production=/);
+  await expect(page).toHaveURL(/production=/);
   const id = new URL(page.url()).searchParams.get("production")!;
-  const status = await (await page.request.get(`/api/videos/${id}`)).json();
+  const status = await (await page.request.get(`/api/videos/${id}`, { maxRetries: 2 })).json();
   expect(status.job.status).toBe("complete");
   const player = page.locator("video").first();
   await expect.poll(() => player.evaluate((video: HTMLVideoElement) => video.readyState)).toBeGreaterThanOrEqual(2);
   expect(await player.evaluate((video: HTMLVideoElement) => video.duration)).toBeCloseTo(60, 0);
   await page.getByRole("button", { name: "Play preview", exact: true }).click();
   await expect.poll(() => player.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeGreaterThan(0.2);
-  const download = await page.request.get(`/api/videos/${id}/download`);
+  const download = await page.request.get(`/api/videos/${id}/download`, { maxRetries: 2 });
   expect(download.ok()).toBe(true);
   expect(download.headers()["content-disposition"]).toContain("attachment");
   expect((await download.body()).subarray(4, 8).toString()).toBe("ftyp");
@@ -130,7 +131,7 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   await page.locator('input[type="file"][accept="application/pdf,.pdf"]').setInputFiles({ name: "garden.pdf", mimeType: "application/pdf", buffer: demoPdf() });
   await expect(page.getByRole("checkbox", { name: "Include garden in this draft", exact: true })).toBeChecked({ timeout: 90_000 });
   await page.getByRole("button", { name: "Continue to direction", exact: true }).click();
-  await page.getByRole("slider", { name: "Duration", exact: true }).focus(); await page.keyboard.press("Home");
+  await expect(page.getByLabel("Video length", { exact: true })).toHaveValue("auto");
   await page.getByLabel("Quality tier", { exact: true }).selectOption("draft");
   await page.getByRole("button", { name: "Continue to review", exact: true }).click();
   await page.getByRole("button", { name: /^Create Draft/ }).click();
@@ -139,8 +140,9 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   if (await fit.isVisible()) await fit.click();
   await page.getByRole("button", { name: "Approve script", exact: true }).click();
   const approved = page.waitForResponse((response) => response.url().endsWith("/approvals") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
+  await page.getByRole("button", { name: /^Approve \d+:\d+ & generate$/ }).click();
   expect((await approved).ok()).toBe(true);
+  await expect(page).toHaveURL(/production=/);
   const id = new URL(page.url()).searchParams.get("production")!;
   // Retry a reset keep-alive connection during local workflow compilation;
   // HTTP errors and production failures still fail this assertion.
@@ -151,7 +153,7 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
     const result = await page.request.get(output.delivery.urls[key]);
     expect(result.ok()).toBe(true); expect((await result.body()).length).toBeGreaterThan(20);
   }
-  expect((await page.request.get(`/api/videos/${id}/download`)).ok()).toBe(true);
+  expect((await page.request.get(`/api/videos/${id}/download`, { maxRetries: 2 })).ok()).toBe(true);
   await page.screenshot({ path: info.outputPath("editorial-desktop.png"), fullPage: true });
   expect(errors).toEqual([]);
 });
@@ -170,6 +172,7 @@ test("explainer teaches the supplied body and preserves citations through export
   await page.getByRole("button", { name: "Continue to review", exact: true }).click();
   await page.getByRole("button", { name: /^Create Draft/ }).click();
   await expect(page.getByRole("button", { name: /^(Approve script|Condense to|Fit to)/ })).toBeVisible();
+  await expect(page).toHaveURL(/production=/);
   const id = new URL(page.url()).searchParams.get("production")!;
   const draft = await (await page.request.get(`/api/productions/${id}`)).json();
   expect(draft.job.script).toContain("practical takeaway");
@@ -178,14 +181,14 @@ test("explainer teaches the supplied body and preserves citations through export
   if (await fit.isVisible()) await fit.click();
   await page.getByRole("button", { name: "Approve script", exact: true }).click();
   const approved = page.waitForResponse((response) => response.url().endsWith("/approvals") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
+  await page.getByRole("button", { name: /^Approve \d+:\d+ & generate$/ }).click();
   expect((await approved).ok()).toBe(true);
   await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`, { maxRetries: 2 })).json()).state, { timeout: 300_000 }).toBe("complete");
   const output = await (await page.request.get(`/api/productions/${id}`)).json();
   expect(output.job.contentType).toBe("explainer");
   expect(output.job.sourceBundle.claims.every((claim: { evidenceRefs: unknown[] }) => claim.evidenceRefs.length > 0)).toBe(true);
   expect((await page.request.get(output.delivery.urls.sourceManifestJson)).ok()).toBe(true);
-  expect((await page.request.get(`/api/videos/${id}/download`)).ok()).toBe(true);
+  expect((await page.request.get(`/api/videos/${id}/download`, { maxRetries: 2 })).ok()).toBe(true);
   await expect(page.locator(".top-pipeline")).toContainText("Phase 11 of 11");
   await expect(page.locator(".top-pipeline")).toContainText("Final validation");
   await expect(page.getByRole("tab", { name: "Pipeline 11/11", exact: true })).toBeVisible();

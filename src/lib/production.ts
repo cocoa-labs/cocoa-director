@@ -345,7 +345,8 @@ export function validateTimeline(input: {
     const spokenMs = narration.reduce((sum, segment) => sum + segment.endMs - segment.startMs, 0);
     const spokenCoverage = spokenMs / input.timeline.durationMs;
     if (narration.length === 0) findings.push(finding("narration.missing", "error", "Narration-led production has no measured narration segments."));
-    if (spokenCoverage < 0.75 || spokenCoverage > 0.92) findings.push(finding("narration.coverage", "error", `Measured spoken coverage is ${Math.round(spokenCoverage * 100)}%; required range is 75–92%.`));
+    const naturalDuration = input.timeline.metadata?.durationMode === "auto" || input.timeline.metadata?.durationMode === "target";
+    if (!naturalDuration && (spokenCoverage < 0.75 || spokenCoverage > 0.92)) findings.push(finding("narration.coverage", "error", `Measured spoken coverage is ${Math.round(spokenCoverage * 100)}%; required range is 75–92%.`));
     let speechCursor = 0;
     for (const segment of narration) {
       const gapMs = segment.startMs - speechCursor;
@@ -353,7 +354,8 @@ export function validateTimeline(input: {
       speechCursor = Math.max(speechCursor, segment.endMs);
     }
     const endingGapMs = input.timeline.durationMs - speechCursor;
-    if (endingGapMs > 1_500) findings.push({ ...finding("narration.unapproved_gap", "error", `Ending narration-free interval is ${endingGapMs}ms; the maximum is 1500ms.`), startMs: speechCursor, endMs: input.timeline.durationMs });
+    if (naturalDuration && (endingGapMs < 3_000 || endingGapMs !== input.timeline.metadata?.endingHoldMs)) findings.push(finding("narration.ending_hold", "error", "Natural-length output needs a measured closing hold of at least three seconds."));
+    if (!naturalDuration && endingGapMs > 1_500) findings.push({ ...finding("narration.unapproved_gap", "error", `Ending narration-free interval is ${endingGapMs}ms; the maximum is 1500ms.`), startMs: speechCursor, endMs: input.timeline.durationMs });
 
     for (const segment of input.timeline.tracks.filter((track) => track.kind === "graphics").flatMap((track) => track.segments)) {
       const motionCues = Array.isArray(segment.metadata.motionCues) ? segment.metadata.motionCues.filter((cue): cue is { atMs: number } => Boolean(cue) && typeof cue === "object" && typeof (cue as { atMs?: unknown }).atMs === "number") : [];

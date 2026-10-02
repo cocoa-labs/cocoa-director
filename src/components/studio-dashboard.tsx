@@ -59,6 +59,8 @@ import {
 } from "lucide-react";
 import { FormEvent, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { EditorialDurationReview } from "@/components/editorial-duration-review";
+import { usesNaturalDuration } from "@/lib/editorial-duration";
 import { MusicConsole, MusicStudioCard, MusicStudioDrawer } from "@/components/music-studio";
 import { CreateSectionTabs, ProductionWorkbench, type CreateSectionId } from "@/components/creative-console-shell";
 import { SeedDrawer, SeedTile, YouAnchorCard } from "@/components/seed-studio";
@@ -81,6 +83,7 @@ import type {
   AspectRatio,
   AnchorAsset,
   ContentType,
+  DurationMode,
   DigestMode,
   EditorScope,
   GeneratedShot,
@@ -344,6 +347,8 @@ export function StudioDashboard({
   const [researchMode, setResearchMode] = useState<ResearchMode>("supplied_only");
   const [draftScript, setDraftScript] = useState("");
   const [durationSeconds, setDurationSeconds] = useState(90);
+  const [durationMode, setDurationMode] = useState<DurationMode>("auto");
+  const isEditorialFormat = contentType === "news_digest" || contentType === "explainer";
   const [visualMode, setVisualMode] = useState<VisualMode>("conceptual");
   const [stylePreset, setStylePreset] = useState<StylePresetId>("auto");
   const [styleIntensity, setStyleIntensity] = useState(42);
@@ -401,7 +406,7 @@ export function StudioDashboard({
     () => contentType === "music_video" ? undefined : detectBriefDurationSeconds(prompt),
     [contentType, prompt],
   );
-  const hasDurationConflict = briefDurationHintSeconds !== undefined && briefDurationHintSeconds !== durationSeconds;
+  const hasDurationConflict = (!isEditorialFormat || durationMode !== "auto") && briefDurationHintSeconds !== undefined && briefDurationHintSeconds !== durationSeconds;
 
   const applySourceSnapshot = useCallback((projectId: string, sources: ProductionSource[]) => {
     setProductionSources(sources);
@@ -531,7 +536,8 @@ export function StudioDashboard({
         window.localStorage.removeItem(ACTIVE_PRODUCTION_STORAGE_KEY);
         url.searchParams.delete("production");
       }
-      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+      // Let Next synchronize its canonical URL; copying its internal state skips that update.
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
     } catch {
       // The in-memory selection still works for this session.
     }
@@ -706,7 +712,8 @@ export function StudioDashboard({
     hydratedJobIdRef.current = restored.id;
     if (restored.contentType) setContentType(restored.contentType);
     setPrompt(restored.prompt);
-    setDurationSeconds(restored.durationSeconds);
+    setDurationSeconds(restored.durationPlan?.requestedTargetSeconds ?? Math.min(600, Math.max(15, restored.durationSeconds)));
+    setDurationMode(restored.durationPlan?.mode ?? "fixed");
     setAspectRatio(restored.aspectRatio);
     if (restored.qualityTier) setQualityTier(restored.qualityTier);
     if (restored.visualStylePreset) setVisualStylePreset(restored.visualStylePreset);
@@ -775,10 +782,12 @@ export function StudioDashboard({
   );
 
   const durationRange = durationRangeFor(contentType);
+  const durationPolicyChanged = isEditorialFormat && job?.job.contentType === contentType && ((job.job.durationPlan?.mode ?? "fixed") !== durationMode || durationMode !== "auto" && (job.job.durationPlan?.requestedTargetSeconds ?? job.job.durationSeconds) !== durationSeconds);
 
   const selectContentType = useCallback((nextContentType: ContentType) => {
     const option = FORMAT_OPTIONS.find((item) => item.id === nextContentType);
     setContentType(nextContentType);
+    setDurationMode("auto");
     setDurationSeconds(option?.defaultDuration ?? 60);
     setAspectRatio(nextContentType === "music_video" || nextContentType === "product_social" ? "9:16" : "16:9");
   }, []);
@@ -788,7 +797,7 @@ export function StudioDashboard({
     createInFlightRef.current = true;
     setBusy(true);
     setError(null);
-    const signature = JSON.stringify([autopilot, contentType, activeProjectId, directorPrompt, durationSeconds, briefDurationHintSeconds, aspectRatio, visualMode, musicControls, qualityTier, digestMode, researchMode, selectedProductionSources.map((source) => source.id), sourceText, sourceTitle, visualStylePreset, libraryAssets.filter((asset) => asset.tags.includes("seed")).map((asset) => [asset.id, asset.url, asset.role, asset.tags])]);
+    const signature = JSON.stringify([autopilot, contentType, activeProjectId, directorPrompt, durationSeconds, durationMode, briefDurationHintSeconds, aspectRatio, visualMode, musicControls, qualityTier, digestMode, researchMode, selectedProductionSources.map((source) => source.id), sourceText, sourceTitle, visualStylePreset, libraryAssets.filter((asset) => asset.tags.includes("seed")).map((asset) => [asset.id, asset.url, asset.role, asset.tags])]);
     if (pendingCreateKeyRef.current?.signature !== signature) pendingCreateKeyRef.current = { signature, key: createClientIdempotencyKey() };
     const idempotencyKey = pendingCreateKeyRef.current.key;
     // Only send musicControls when the user actually touched the panel, so a default-auto run
@@ -873,6 +882,7 @@ export function StudioDashboard({
               researchMode,
               presentationMode: "faceless",
               targetDurationSeconds: durationSeconds,
+              durationMode: (contentType === "news_digest" || contentType === "explainer") ? durationMode : "fixed",
               briefDurationHintSeconds,
               aspectRatio,
               language: "en",
@@ -905,7 +915,7 @@ export function StudioDashboard({
       createInFlightRef.current = false;
       setBusy(false);
     }
-  }, [activeProjectId, aspectRatio, briefDurationHintSeconds, contentType, digestMode, directorPrompt, durationSeconds, fetchJob, handleBackgroundRefreshError, libraryAssets, musicControls, prompt, qualityTier, refreshProjectData, researchMode, selectedProductionSources, sourceText, sourceTitle, visualMode, visualStylePreset]);
+  }, [activeProjectId, aspectRatio, briefDurationHintSeconds, contentType, digestMode, directorPrompt, durationSeconds, durationMode, fetchJob, handleBackgroundRefreshError, libraryAssets, musicControls, prompt, qualityTier, refreshProjectData, researchMode, selectedProductionSources, sourceText, sourceTitle, visualMode, visualStylePreset]);
 
   async function addTextSource() {
     if (!sourceText.trim()) return;
@@ -1044,7 +1054,7 @@ export function StudioDashboard({
     setBusy(true);
     try {
       const idempotencyKey = createClientIdempotencyKey();
-      const response = await fetch(`/api/productions/${videoId}/approvals`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ gate, artifactVersionId, confirmSpend: gate === "storyboard", idempotencyKey }) });
+      const response = await fetch(`/api/productions/${videoId}/approvals`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ gate, artifactVersionId, confirmSpend: gate === "storyboard", acceptedDurationSeconds: usesNaturalDuration(job.job) ? job.job.durationSeconds : undefined, idempotencyKey }) });
       const json = await readApiJson<{ error?: string }>(response);
       if (!response.ok) throw new Error(json.error ?? `${gate} approval failed`);
       setJob(await fetchJob(videoId));
@@ -1094,12 +1104,12 @@ export function StudioDashboard({
     finally { setBusy(false); }
   }
 
-  async function regenerateNewsEditorial() {
+  async function regenerateNewsEditorial(preserveScript = false, excludedClaimIds?: string[]) {
     if (!videoId) return;
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/productions/${videoId}/regenerate-editorial`, { method: "POST" });
+      const response = await fetch(`/api/productions/${videoId}/regenerate-editorial`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": createClientIdempotencyKey() }, body: JSON.stringify({ durationMode, targetDurationSeconds: durationSeconds, preserveScript, excludedClaimIds }) });
       const json = await readApiJson<{ error?: string }>(response);
       if (!response.ok) throw new Error(json.error ?? "Editorial regeneration failed");
       setJob(await fetchJob(videoId));
@@ -2073,6 +2083,7 @@ export function StudioDashboard({
     setAspectRatio("9:16");
     setSourceText("");
     setDurationSeconds(90);
+    setDurationMode("auto");
     setVisualMode("conceptual");
     setStylePreset("auto");
     setStyleIntensity(42);
@@ -2342,6 +2353,16 @@ export function StudioDashboard({
                 ) : null}
 
                 <div className="control-block">
+                  {isEditorialFormat ? <div className="mb-3 space-y-2">
+                    <label className="field-label" htmlFor="duration-mode">Video length</label>
+                    <select id="duration-mode" className="toolbar-select w-full" value={durationMode} onChange={(event) => setDurationMode(event.target.value as DurationMode)}>
+                      <option value="auto">Automatic length</option>
+                      <option value="target">Approximate length</option>
+                      {durationMode === "fixed" ? <option value="fixed">Fixed length · existing project</option> : null}
+                    </select>
+                    <p className="text-xs leading-5 text-muted">{durationMode === "auto" ? "Let the source determine the runtime, up to ten minutes. Review coverage and cost before generation." : durationMode === "target" ? "An approximate target allows ±20%. A complete explanation outside that range is proposed for review." : "This project retains its original fixed-length policy."}</p>
+                  </div> : null}
+                  {!isEditorialFormat || durationMode !== "auto" ? <>
                   <div className="flex items-center justify-between gap-3">
                     <label className="field-label" htmlFor="duration">
                       Duration
@@ -2367,6 +2388,8 @@ export function StudioDashboard({
                       <button type="button" className="shrink-0 rounded border border-amber-300/40 px-2 py-1 font-medium hover:bg-amber-300/10" onClick={() => setDurationSeconds(briefDurationHintSeconds)}>Use brief duration</button>
                     </div>
                   ) : null}
+                  </> : null}
+                  {durationPolicyChanged ? <button type="button" className="secondary-command mt-3 w-full" disabled={busy || job?.job.status === "running"} onClick={() => void regenerateNewsEditorial(true)}>Apply length and review</button> : null}
                 </div>
 
                 <div className="grid grid-cols-3 gap-2">
@@ -2543,6 +2566,7 @@ export function StudioDashboard({
                 </div>
 
                 {visibleError ? <ErrorDetail>{visibleError}</ErrorDetail> : null}
+                {job ? <EditorialDurationReview key={`${job.job.id}:${job.job.updatedAt}`} job={job.job} busy={busy} onReplan={(excluded) => void regenerateNewsEditorial(false, excluded)} /> : null}
                 {fittingEditorial ? <div role="status" className="status-card text-sm text-accent"><Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> {editorialTiming?.canFitRecording ? "Fitting the saved recording. Your script and voice take will be retained." : "Fitting the script to duration. The revised script will appear here for review."}</div> : null}
                 {productionProgress?.recoverable && productionProgress.units.some((unit) => (unit.kind === "image" || unit.kind === "video") && (unit.state === "failed" || unit.state === "needs_attention")) ? (
                   <div className="status-card space-y-2 text-sm">
@@ -2585,9 +2609,9 @@ export function StudioDashboard({
                       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/8">
                         <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, (editorialCoverage ?? 0) * 100)}%` }} />
                       </div>
-                      <div className="mt-2 text-[10px] leading-4 text-muted">{editorialTiming?.measured ? editorialTiming.retimeRate !== 1 ? `Recorded ${(editorialTiming.recordedDurationMs / 1_000).toFixed(1)} seconds; playback at ${editorialTiming.retimeRate.toFixed(3)}× pace with pitch preserved.` : "Measured from the recorded narration. Fit to duration if the audio leaves too little or too much room for transitions." : "Estimated from the saved script. The recorded audio is checked before visuals and rendering begin."}</div>
+                      <div className="mt-2 text-[10px] leading-4 text-muted">{editorialTiming?.measured ? editorialTiming.retimeRate !== 1 ? `Recorded ${(editorialTiming.recordedDurationMs / 1_000).toFixed(1)} seconds; playback at ${editorialTiming.retimeRate.toFixed(3)}× pace with pitch preserved.` : usesNaturalDuration(job.job) ? "Normal-speed narration. Runtime includes transitions and at least three seconds for the closing takeaway." : "Measured from the recorded narration. Fit to duration if the audio leaves too little or too much room for transitions." : "Estimated from the saved script. The recorded audio is checked before visuals and rendering begin."}</div>
                       <div className={`mt-1 font-mono text-[10px] ${!editorialFitNeeded ? "text-accent" : "text-amber-300"}`}>
-                        {Math.round((editorialCoverage ?? 0) * 100)}% {editorialTiming?.measured ? "measured" : "estimated"} spoken coverage · required {Math.round((editorialTiming?.budget.minimumCoverage ?? 0.75) * 100)}–92%
+                        {Math.round((editorialCoverage ?? 0) * 100)}% {editorialTiming?.measured ? "measured" : "estimated"} spoken coverage{usesNaturalDuration(job.job) ? " · natural pace" : ` · required ${Math.round((editorialTiming?.budget.minimumCoverage ?? 0.75) * 100)}–92%`}
                       </div>
                       {editorialFitNeeded ? (
                         <div className="mt-2 text-[11px] leading-4 text-foreground">
@@ -2696,7 +2720,7 @@ export function StudioDashboard({
                             </div>
                           ))}
                         </div>
-                        <button type="button" className="primary-command w-full" disabled={busy || editorialStoryboardApproved} onClick={() => void approveNews("storyboard")}><Sparkles className="h-4 w-4" /> {editorialStoryboardApproved ? "Storyboard approved" : "Approve storyboard & generate"}</button>
+                        <button type="button" className="primary-command w-full" disabled={busy || editorialStoryboardApproved || job.job.durationPlan?.scopeTooLong} onClick={() => void approveNews("storyboard")}><Sparkles className="h-4 w-4" /> {editorialStoryboardApproved ? "Storyboard approved" : usesNaturalDuration(job.job) ? `Approve ${formatSeconds(job.job.durationSeconds)} & generate` : "Approve storyboard & generate"}</button>
                         <div className="text-[11px] leading-4 text-muted">Approval authorizes up to ${((job.job.estimatedCostCents + job.job.recoveryBudgetCents) / 100).toFixed(2)} for the remaining narration, score, visuals and render, in addition to calls already submitted. Completed assets are retained during recovery.</div>
                       </div>
                     ) : null}
@@ -5417,6 +5441,11 @@ function PreviewPanel({
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewMuted, setPreviewMuted] = useState(false);
+  const [playback, setPlayback] = useState({ key: "", time: 0, duration: 0 });
+  const editorialPlayback = job?.contentType === "explainer" || job?.contentType === "news_digest";
+  const playbackTime = playback.key === previewMedia.key ? playback.time : 0;
+  const playbackDuration = playback.key === previewMedia.key && playback.duration > 0 ? playback.duration : job?.durationSeconds ?? 0;
+  const updatePlayback = (element: HTMLVideoElement) => setPlayback({ key: previewMedia.key ?? "", time: element.currentTime, duration: Number.isFinite(element.duration) ? element.duration : 0 });
   const hasPlayableVideo = previewMedia.kind === "video" && Boolean(previewMedia.src);
   const togglePreviewPlay = () => {
     const element = previewVideoRef.current;
@@ -5520,6 +5549,10 @@ function PreviewPanel({
             controls
             playsInline
             muted={previewMuted}
+            onLoadedMetadata={(event) => updatePlayback(event.currentTarget)}
+            onTimeUpdate={(event) => updatePlayback(event.currentTarget)}
+            onSeeked={(event) => updatePlayback(event.currentTarget)}
+            onEmptied={() => setPreviewPlaying(false)}
             onPlay={() => setPreviewPlaying(true)}
             onPause={() => setPreviewPlaying(false)}
             onEnded={() => setPreviewPlaying(false)}
@@ -5560,11 +5593,11 @@ function PreviewPanel({
           {previewMuted ? <VolumeX className="h-4 w-4" aria-hidden /> : <Volume2 className="h-4 w-4" aria-hidden />}
         </button>
         <div className="transport-track">
-          <div style={{ width: `${progress && !job?.finalVideoUrl ? 0 : jobProgressPercent(job)}%` }} />
+          <div style={{ width: `${editorialPlayback ? playbackDuration > 0 ? Math.min(100, playbackTime / playbackDuration * 100) : 0 : progress && !job?.finalVideoUrl ? 0 : jobProgressPercent(job)}%` }} />
         </div>
-        <span>{progress && !job?.finalVideoUrl ? "--:--" : job ? formatSeconds(Math.round((job.durationSeconds * jobProgressPercent(job)) / 100)) : "0:00"}</span>
+        <span aria-label="Playback position">{editorialPlayback ? formatSeconds(Math.floor(playbackTime)) : progress && !job?.finalVideoUrl ? "--:--" : job ? formatSeconds(Math.round((job.durationSeconds * jobProgressPercent(job)) / 100)) : "0:00"}</span>
         <span>/</span>
-        <span>{formatSeconds(job?.durationSeconds ?? 90)}</span>
+        <span>{formatSeconds(editorialPlayback ? Math.ceil(playbackDuration) : job?.durationSeconds ?? 90)}</span>
       </div>
       {job?.musicTrack?.url ? (
         <audio controls src={job.musicTrack.url} className="mt-3 w-full" />
@@ -8799,7 +8832,7 @@ function durationRangeFor(contentType: ContentType) {
   if (contentType === "music_video") return { min: 60, max: 120 };
   if (contentType === "product_social") return { min: 15, max: 180 };
   if (contentType === "custom") return { min: 15, max: 600 };
-  return { min: 30, max: 300 };
+  return { min: 15, max: 600 };
 }
 
 

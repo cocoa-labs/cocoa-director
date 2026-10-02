@@ -144,6 +144,7 @@ create table if not exists video_jobs (
   visual_style_preset text not null default 'auto',
   visual_plan jsonb,
   editorial_plan jsonb,
+  duration_plan jsonb,
   storyboard jsonb,
   approvals jsonb not null default '[]'::jsonb,
   timeline_manifest jsonb,
@@ -214,6 +215,9 @@ alter table if exists video_jobs
 
 alter table if exists video_jobs
   add column if not exists editorial_plan jsonb;
+
+alter table if exists video_jobs
+  add column if not exists duration_plan jsonb;
 
 alter table if exists video_jobs
   add column if not exists storyboard jsonb;

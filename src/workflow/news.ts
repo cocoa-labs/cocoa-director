@@ -225,7 +225,7 @@ export async function runNewsProductionWorkflow(videoId: string, options: NewsWo
   let activeStep = "narration";
   try {
     const context = await getHybridPreparationContextStep(videoId);
-    const selectedBeatIds = options.recoveryBeatIds?.length ? options.recoveryBeatIds : context.beatIds;
+    let selectedBeatIds = options.recoveryBeatIds?.length ? options.recoveryBeatIds : context.beatIds;
     await recordEditorialStepStep(videoId, "narration", "running");
     await runNarrationBatches(videoId, context.sceneIds);
     await recordEditorialStepStep(videoId, "narration", "complete");
@@ -237,6 +237,7 @@ export async function runNewsProductionWorkflow(videoId: string, options: NewsWo
       return { videoId, state: "awaiting_user" as const, reason: "script_revision" as const };
     }
     await recordEditorialStepStep(videoId, "timing_reconciliation", "complete");
+    if (timing.timingPlan?.version === 3 && !options.recoveryBeatIds?.length) selectedBeatIds = (await getHybridPreparationContextStep(videoId)).beatIds;
 
     activeStep = "imagery";
     await recordEditorialStepStep(videoId, "imagery", "running");

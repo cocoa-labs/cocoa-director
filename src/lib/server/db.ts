@@ -88,7 +88,8 @@ export async function withTransaction<T>(operation: (sql: SqlClient) => Promise<
 
 /** Read-only: migrations are an explicit deployment step, never a request side effect. */
 export async function checkDatabaseSchema() {
-  const rows = await getSql()`select version from app_schema_migrations where version = 1`;
+  const rows = await getSql()`select version from app_schema_migrations where version = 1
+    and exists (select 1 from information_schema.columns where table_schema = current_schema() and table_name = 'video_jobs' and column_name = 'duration_plan')`;
   if (rows.length !== 1) throw new Error("Database migration required. Run npm run db:migrate.");
 }
 

@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { ApiRequestError, apiErrorResponse } from "@/lib/server/api-error";
-import { approveNewsGate } from "@/lib/server/news-editorial";
+import { approveNewsGate, assertDurationProposal, assertEditorialStoryboardReady } from "@/lib/server/news-editorial";
 import { SpendGuardError } from "@/lib/server/spend-guard";
 import { assertVideoActionAllowed, spendGuardResponse } from "@/lib/server/video-action-guard";
 import { authorizeVideoRequest, idempotencyKeyFromRequest } from "@/lib/server/videos";
@@ -14,6 +14,7 @@ const ApprovalRequest = z.object({
   gate: z.enum(["script", "storyboard"]),
   artifactVersionId: z.string().uuid(),
   confirmSpend: z.boolean().optional(),
+  acceptedDurationSeconds: z.number().int().positive().optional(),
   idempotencyKey: z.string().trim().min(8).max(120).optional(),
 });
 
@@ -25,12 +26,14 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
     const body = ApprovalRequest.parse(await request.json());
     const alreadyApproved = auth.job.approvals?.some((approval) => approval.gate === body.gate && approval.artifactVersionId === body.artifactVersionId);
     if (body.gate === "storyboard" && !alreadyApproved) {
+      assertDurationProposal(auth.job, body.acceptedDurationSeconds);
       if (!body.confirmSpend) throw new ApiRequestError("Spend confirmation is required before narration and asset generation.", 409, "spend_confirmation_required");
       const currentVersion = auth.job.workflowSteps?.find((step) => step.id === "storyboard")?.artifactVersionId;
       if (currentVersion !== body.artifactVersionId) throw new ApiRequestError("This storyboard approval is stale. Review the latest version before approving.", 409, "stale_approval");
       const scriptVersion = auth.job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId;
       if (!scriptVersion || !auth.job.approvals?.some((approval) => approval.gate === "script" && approval.artifactVersionId === scriptVersion)) throw new ApiRequestError("Approve the current cited script before approving the storyboard.", 409, "current_approval_required");
       if (auth.job.cancellationRequested || auth.job.status === "cancelled") throw new ApiRequestError("Production cancelled.", 409, "production_cancelled");
+      assertEditorialStoryboardReady(auth.job);
       const idempotencyKey = idempotencyKeyFromRequest(request, body);
       if (!idempotencyKey) return NextResponse.json({ error: "Missing Idempotency-Key header" }, { status: 400 });
       const guard = await assertVideoActionAllowed({

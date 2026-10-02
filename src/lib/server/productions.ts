@@ -1,9 +1,11 @@
+import { naturalEditorialAllowance } from "@/lib/editorial-costs";
 import { createHash, randomUUID } from "node:crypto";
 
-import { ProductionCreateRequest, type SourceBundle, type SourceFragment, type VideoJob, type WorkflowStep } from "@/lib/schemas";
+import { ProductionCreateRequest, type HybridVisualPlanV2, type NewsStoryboard, type SourceBundle, type SourceFragment, type VideoJob, type WorkflowStep } from "@/lib/schemas";
 import { isExplicitBreakingClaim } from "@/lib/news-claims";
+import { makeDurationPlan, usesNaturalDuration } from "@/lib/editorial-duration";
 import { editorialNarrationTiming } from "@/lib/editorial-narration";
-import { applyValidatedLikenessRouting, attachVisualPlanToStoryboard, buildHybridVisualPlan, narrationBudgetSummary } from "@/lib/hybrid-visuals";
+import { applyValidatedLikenessRouting, attachVisualPlanToStoryboard, buildHybridVisualPlan, recalculateHybridVisualPlan, narrationBudgetSummary } from "@/lib/hybrid-visuals";
 import { ApiRequestError } from "@/lib/server/api-error";
 import type { UserContext } from "@/lib/server/auth";
 import { isCinematicReenactmentsEnabled, isEditorialDirectionV3Enabled, isEditorialTimingV2Enabled, isHybridSafeRecoveryEnabled, isHybridVisualsV2Enabled, isHybridWorkflowV4Enabled, isLikenessLiveValidated, isLikenessVideoEnabled, isNewsDigestV2Enabled, isNewsPresenterEnabled, isNewsWebResearchEnabled, isSourceVisualsV2Enabled } from "@/lib/server/config";
@@ -89,7 +91,7 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
     ? await auditDifficultNewsClaims(await linkClaimEvidence(draft.sourceBundle))
     : await linkClaimEvidence(draft.sourceBundle);
   if (input.contentType === "news_digest" || input.contentType === "explainer") {
-    const editorialOutline = await generateNewsEditorialOutline({ request: input, sourceBundle });
+    const editorialOutline = usesNaturalDuration(input) && draft.timeline.durationMs > 600_000 ? undefined : await generateNewsEditorialOutline({ request: input, sourceBundle });
     if (editorialOutline) {
       draft = buildSourceFirstDraft(job.id, { ...input, sourceBundle }, now, editorialOutline);
       sourceBundle = await linkClaimEvidence(draft.sourceBundle);
@@ -97,12 +99,15 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
     }
     sourceBundle = applyEditorialClaimSelection(sourceBundle, draft.editorialPlan.scenes.flatMap((scene) => scene.claimIds));
   }
+  const durationPlan = usesNaturalDuration(input) ? makeDurationPlan({ request: input, sourceBundle, scenes: draft.outline, now }) : undefined;
+  const visualRequest = durationPlan ? { ...input, targetDurationSeconds: durationPlan.estimatedDurationSeconds } : input;
   const linkedStoryboard = input.contentType === "news_digest" || input.contentType === "explainer"
     ? citationLinkedStoryboard(draft.storyboard, sourceBundle)
     : draft.storyboard;
-  const plannedVisualsBase = isHybridVisualsV2Enabled()
-    ? buildHybridVisualPlan({ productionId: job.id, request: input, storyboard: linkedStoryboard, createdAt: now, directionVersion: isEditorialTimingV2Enabled() ? 4 : isEditorialDirectionV3Enabled() ? 3 : 2 })
+  const plannedVisualsBase = isHybridVisualsV2Enabled() && !durationPlan?.scopeTooLong
+    ? buildHybridVisualPlan({ productionId: job.id, request: visualRequest, storyboard: linkedStoryboard, createdAt: now, directionVersion: isEditorialTimingV2Enabled() ? 4 : isEditorialDirectionV3Enabled() ? 3 : 2 })
     : undefined;
+  if (plannedVisualsBase && durationPlan) scopeNaturalVisualIds(plannedVisualsBase, linkedStoryboard, input.aspectRatio);
   const plannedVisuals = plannedVisualsBase && isSourceVisualsV2Enabled()
     ? attachAuthenticSourceVisuals(plannedVisualsBase, sourceBundle)
     : plannedVisualsBase;
@@ -123,11 +128,13 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
         : step);
   return store.updateJob(job.id, {
     ...basePatch,
+    durationPlan,
+    durationSeconds: durationPlan?.estimatedDurationSeconds ?? input.targetDurationSeconds,
     sourceBundle,
     editorialPlan: draft.editorialPlan,
     storyboard,
     visualPlan,
-    estimatedCostCents: visualPlan ? visualPlan.metrics.estimatedCostCents + 150 : job.estimatedCostCents,
+    estimatedCostCents: durationPlan?.scopeTooLong ? 0 : visualPlan ? durationPlan ? naturalEditorialAllowance({ plan: visualPlan, aspectRatio: input.aspectRatio, durationSeconds: durationPlan.estimatedDurationSeconds, narration: draft.outline.map((scene) => scene.narration) }) : visualPlan.metrics.estimatedCostCents + 150 : job.estimatedCostCents,
     recoveryBudgetCents,
     recoverySpentCents: 0,
     timelineManifest: draft.timeline,
@@ -145,14 +152,16 @@ export async function createProduction(input: ProductionCreateRequest, user: Use
   });
 }
 
-export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserContext) {
+export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserContext, policy?: { durationMode?: ProductionCreateRequest["durationMode"]; targetDurationSeconds?: number; preserveScript?: boolean; excludedClaimIds?: string[] }) {
   if (job.status === "running" || job.cancellationRequested) throw new ApiRequestError("This production cannot be edited while running or after cancellation.", 409, "production_not_editable");
   if ((job.contentType !== "news_digest" && job.contentType !== "explainer") || job.userId !== user.id) throw new Error("Editorial production not found.");
   const store = getStore();
   const sources = (await store.listProductionSources(job.projectId)).filter((source) => source.productionId === job.id);
-  if (sources.length === 0) throw new Error("Add at least one ready source before regenerating the editorial draft.");
+  if (sources.length === 0 && !job.sourceBundle?.inputs.length) throw new Error("Add at least one ready source before regenerating the editorial draft.");
   const now = new Date().toISOString();
-  let sourceBundle = await hydrateBundleFromRecords({ inputs: [], claims: [] }, sources.map((source) => source.id), user.id, job.projectId);
+  let sourceBundle = policy?.excludedClaimIds && job.sourceBundle ? job.sourceBundle : sources.length > 0
+    ? await hydrateBundleFromRecords({ inputs: [], claims: [] }, sources.map((source) => source.id), user.id, job.projectId)
+    : job.sourceBundle!;
   const request = ProductionCreateRequest.parse({
     contentType: job.contentType,
     projectId: job.projectId,
@@ -163,25 +172,35 @@ export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserCont
     researchMode: "supplied_only",
     presentationMode: job.presentationMode ?? "faceless",
     visualStylePreset: job.visualStylePreset ?? "auto",
-    targetDurationSeconds: job.durationSeconds,
+    voiceId: job.durationPlan?.voiceId,
+    excludedClaimIds: policy?.excludedClaimIds ?? job.durationPlan?.excludedClaimIds ?? [],
+    durationMode: policy?.durationMode ?? job.durationPlan?.mode ?? "fixed",
+    targetDurationSeconds: policy?.targetDurationSeconds ?? job.durationPlan?.requestedTargetSeconds ?? Math.min(600, Math.max(15, job.durationSeconds)),
     aspectRatio: job.aspectRatio,
     qualityTier: job.qualityTier ?? "standard",
   });
-  sourceBundle = await extractIntelligentNewsClaims(sourceBundle, request.digestMode, job.contentType);
-  let draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle }, now);
+  if (policy?.preserveScript && job.editorialPlan && job.storyboard && job.sourceBundle) {
+    return reviseEditorialDuration(job, request, now);
+  }
+  if (policy?.excludedClaimIds?.some((id) => !sourceBundle.claims.some((claim) => claim.id === id))) throw new ApiRequestError("Scope selection contains an unknown claim. Reload the outline.", 409, "stale_scope");
+  if (!policy?.excludedClaimIds) sourceBundle = await extractIntelligentNewsClaims(sourceBundle, request.digestMode, job.contentType);
+  let draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle }, now, undefined, job.visualPlan?.narrationWordsPerSecond);
   let linkedBundle = await linkClaimEvidence(draft.sourceBundle);
   if (job.contentType === "news_digest") linkedBundle = await auditDifficultNewsClaims(linkedBundle);
-  const editorialOutline = await generateNewsEditorialOutline({ request, sourceBundle: linkedBundle });
+  const editorialOutline = usesNaturalDuration(request) && draft.timeline.durationMs > 600_000 ? undefined : await generateNewsEditorialOutline({ request, sourceBundle: linkedBundle });
   if (editorialOutline) {
-    draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle: linkedBundle }, now, editorialOutline);
+    draft = buildSourceFirstDraft(job.id, { ...request, sourceBundle: linkedBundle }, now, editorialOutline, job.visualPlan?.narrationWordsPerSecond);
     linkedBundle = await linkClaimEvidence(draft.sourceBundle);
     if (job.contentType === "news_digest") linkedBundle = await auditDifficultNewsClaims(linkedBundle);
   }
   linkedBundle = applyEditorialClaimSelection(linkedBundle, draft.editorialPlan.scenes.flatMap((scene) => scene.claimIds));
+  const durationPlan = usesNaturalDuration(request) ? makeDurationPlan({ request, sourceBundle: linkedBundle, scenes: draft.outline, wordsPerSecond: job.visualPlan?.narrationWordsPerSecond, now }) : undefined;
+  const visualRequest = durationPlan ? { ...request, targetDurationSeconds: durationPlan.estimatedDurationSeconds } : request;
   const linkedStoryboard = citationLinkedStoryboard(draft.storyboard, linkedBundle);
-  const visualPlanBase = isHybridVisualsV2Enabled()
-    ? buildHybridVisualPlan({ productionId: job.id, request, storyboard: linkedStoryboard, createdAt: now, directionVersion: isEditorialTimingV2Enabled() ? 4 : isEditorialDirectionV3Enabled() ? 3 : 2 })
+  const visualPlanBase = isHybridVisualsV2Enabled() && !durationPlan?.scopeTooLong
+    ? buildHybridVisualPlan({ productionId: job.id, request: visualRequest, storyboard: linkedStoryboard, createdAt: now, directionVersion: isEditorialTimingV2Enabled() ? 4 : isEditorialDirectionV3Enabled() ? 3 : 2 })
     : undefined;
+  if (visualPlanBase && durationPlan) scopeNaturalVisualIds(visualPlanBase, linkedStoryboard, job.aspectRatio);
   const visualPlan = visualPlanBase && isSourceVisualsV2Enabled() ? attachAuthenticSourceVisuals(visualPlanBase, linkedBundle) : visualPlanBase;
   const storyboard = attachVisualPlanToStoryboard(linkedStoryboard, visualPlan);
   const script = job.contentType === "news_digest" ? citedScript(draft.editorialPlan.scenes, linkedBundle) : draft.script;
@@ -192,12 +211,14 @@ export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserCont
   const workflowSteps = markDraftSteps(initialWorkflowSteps(job.contentType), job.contentType, qaReport.passed, now)
     .map((step) => step.id === "script" ? { ...step, artifactVersionId: scriptVersionId } : step.id === "storyboard" ? { ...step, artifactVersionId: storyboardVersionId } : step);
   return store.updateJob(job.id, {
+    durationPlan,
+    durationSeconds: durationPlan?.estimatedDurationSeconds ?? request.targetDurationSeconds,
     sourceBundle: linkedBundle,
     editorialPlan: draft.editorialPlan,
     storyboard,
     visualPlan,
     visualStylePreset: request.visualStylePreset,
-    estimatedCostCents: visualPlan ? visualPlan.metrics.estimatedCostCents + 150 : job.estimatedCostCents,
+    estimatedCostCents: durationPlan?.scopeTooLong ? 0 : visualPlan ? durationPlan ? naturalEditorialAllowance({ plan: visualPlan, aspectRatio: job.aspectRatio, durationSeconds: durationPlan.estimatedDurationSeconds, narration: draft.outline.map((scene) => scene.narration) }) : visualPlan.metrics.estimatedCostCents + 150 : job.estimatedCostCents,
     recoveryBudgetCents,
     recoverySpentCents: 0,
     script,
@@ -215,7 +236,40 @@ export async function regenerateNewsEditorialDraft(job: VideoJob, user: UserCont
   });
 }
 
+async function reviseEditorialDuration(job: VideoJob, request: ProductionCreateRequest, now: string) {
+  const { applyTimingPlan, compileNaturalEditorialTiming } = await import("@/lib/editorial-timing");
+  const durationPlan = usesNaturalDuration(request) ? makeDurationPlan({ request, sourceBundle: job.sourceBundle!, scenes: job.storyboard!.scenes, wordsPerSecond: job.visualPlan?.narrationWordsPerSecond, now }) : undefined;
+  const oldTiming = job.visualPlan?.timingPlan;
+  const currentScript = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId;
+  const measured = durationPlan && oldTiming && oldTiming.scriptVersionId === currentScript
+    ? compileNaturalEditorialTiming({ productionId: job.id, scriptVersionId: currentScript, storyboard: job.storyboard!, narration: oldTiming.scenes.map((scene) => ({ sceneId: scene.sceneId, durationMs: scene.measuredNarrationMs })), compiledAt: now }) : undefined;
+  const estimated = durationPlan && !measured ? compileNaturalEditorialTiming({ productionId: job.id, storyboard: job.storyboard!, narration: job.storyboard!.scenes.map((scene) => ({ sceneId: scene.id, durationMs: Math.max(1000, Math.round(scene.narration.split(/\s+/).length / (job.visualPlan?.narrationWordsPerSecond ?? 2) * 1000)) })), compiledAt: now }) : undefined;
+  const timing = measured ?? estimated;
+  const seconds = timing ? timing.targetDurationMs / 1_000 : request.targetDurationSeconds;
+  const storyboard = { ...job.storyboard!, scenes: job.storyboard!.scenes.map((scene) => ({ ...scene, startMs: Math.round(scene.startMs * seconds / job.durationSeconds), endMs: Math.round(scene.endMs * seconds / job.durationSeconds) })) };
+  const timed = job.visualPlan && timing ? seconds > 600 ? { storyboard, plan: { ...job.visualPlan, timingPlan: timing } } : applyTimingPlan(storyboard, job.visualPlan, timing) : undefined;
+  const reflowed = timed?.plan ?? (job.visualPlan ? { ...job.visualPlan, timingPlan: undefined, metrics: { ...job.visualPlan.metrics, targetDurationMs: seconds * 1_000 }, beats: job.visualPlan.beats.map((beat) => ({ ...beat, startMs: Math.round(beat.startMs * seconds / job.durationSeconds), endMs: Math.round(beat.endMs * seconds / job.durationSeconds) })) } : undefined);
+  const visualPlan = reflowed ? { ...recalculateHybridVisualPlan(reflowed), timingPlan: measured } : undefined;
+  const nextStoryboard = attachVisualPlanToStoryboard(timed?.storyboard ?? storyboard, visualPlan);
+  const version = randomUUID();
+  return getStore().mutateJob(job.id, (current) => {
+    if (current.updatedAt !== job.updatedAt || current.status === "running" || current.cancellationRequested) throw new ApiRequestError("This production changed. Reload before changing its duration.", 409, "stale_draft");
+    return {
+      durationPlan: durationPlan ? { ...durationPlan, estimatedDurationSeconds: estimated ? seconds : durationPlan.estimatedDurationSeconds, resolvedDurationSeconds: measured ? seconds : undefined, scopeTooLong: seconds > 600 } : undefined,
+      durationSeconds: seconds, storyboard: nextStoryboard, visualPlan, timelineManifest: undefined, finalVideoUrl: undefined,
+      ...(durationPlan && visualPlan ? { estimatedCostCents: naturalEditorialAllowance({ plan: visualPlan, aspectRatio: job.aspectRatio, durationSeconds: seconds, narration: measured ? [] : job.storyboard!.scenes.map((scene) => scene.narration) }) } : {}),
+      approvals: (job.approvals ?? []).filter((approval) => approval.gate === "script"),
+      workflowSteps: (job.workflowSteps ?? []).map((step): WorkflowStep => step.id === "storyboard" ? { ...step, artifactVersionId: version, state: "complete" }
+        : step.id === "storyboard_approval" ? { ...step, state: "awaiting_user", error: undefined }
+        : ["timing_reconciliation", "timeline", "preflight_qa", "render", "final_qa", "review"].includes(step.id) ? { ...step, state: "pending", error: undefined, completedAt: undefined } : step),
+      artifactVersions: [...job.artifactVersions, { id: version, scope: "storyboard", label: "Runtime revised", payload: nextStoryboard, urls: {}, createdAt: now }],
+      status: "awaiting_user", error: undefined,
+    };
+  });
+}
+
 export async function fitProductionEditorialDraft(job: VideoJob, user: UserContext) {
+  if (usesNaturalDuration(job)) throw new ApiRequestError("Automatic and approximate projects preserve the complete explanation. Review the runtime or narrow the source scope instead.", 409, "duration_review_required");
   if (job.status === "running" || job.cancellationRequested) throw new ApiRequestError("This production cannot be edited while running or after cancellation.", 409, "production_not_editable");
   if ((job.contentType !== "news_digest" && job.contentType !== "explainer") || job.userId !== user.id) {
     throw new Error("Editorial production not found.");
@@ -450,4 +504,16 @@ function markDraftSteps(
     if (!complete.has(step.id)) return step;
     return { ...step, state: "complete", completedAt };
   });
+}
+
+/** Stable across duration-only changes; changed teaching content needs new visuals. */
+function scopeNaturalVisualIds(plan: HybridVisualPlanV2, storyboard: NewsStoryboard, aspectRatio: string) {
+  for (const beat of plan.beats) {
+    const scene = storyboard.scenes.find((candidate) => candidate.id === beat.sceneId);
+    const signature = createHash("sha256").update(JSON.stringify({ narration: scene?.narration, title: scene?.title,
+      prompt: beat.generationPrompt, kind: beat.kind, motion: beat.motionDirection, route: beat.providerRoute,
+      palette: plan.continuityKit.palette, quality: plan.qualityTier, aspectRatio,
+    })).digest("hex").slice(0, 12);
+    beat.id = `${beat.id}-${signature}`;
+  }
 }

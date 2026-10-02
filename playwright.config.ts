@@ -10,12 +10,12 @@ export default defineConfig({
   reporter: [["list"], ["html", { open: "never" }]],
   use: { baseURL: "http://127.0.0.1:3100", viewport: { width: 1440, height: 1000 }, trace: "retain-on-failure", screenshot: "only-on-failure" },
   webServer: {
-    command: "npm run dev -- --port 3100",
+    command: "npm run dev -- --webpack --port 3100",
     url: "http://127.0.0.1:3100",
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
-      PROVIDER_MODE: "mock", PROVIDER_CALLS_ENABLED: "", REQUIRE_AUTH: "false",
+      PROVIDER_MODE: "mock", PROVIDER_CALLS_ENABLED: "", REQUIRE_AUTH: "false", NODE_NO_WARNINGS: "1",
       DATABASE_URL: "", BLOB_READ_WRITE_TOKEN: "", PRIVATE_BLOB_READ_WRITE_TOKEN: "",
       OPENAI_API_KEY: "", FAL_KEY: "", ELEVENLABS_API_KEY: "", AUTH_SECRET: "",
       // Simulated costs only. Exercise many independent workflows in this process.

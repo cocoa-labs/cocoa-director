@@ -7,6 +7,7 @@ import { criticalSection } from "@/lib/server/critical-section";
 import { getSql, hasDatabase } from "@/lib/server/db";
 import { getStore } from "@/lib/server/store";
 import { ApiRequestError } from "@/lib/server/api-error";
+import { usesNaturalDuration } from "@/lib/editorial-duration";
 
 export type Reservation = {
   id: string; userId: string; scope: string; key: string; fingerprint: string;
@@ -218,6 +219,7 @@ export async function reserveProviderAttempt(input: { scope: string; key?: strin
     const currentJob = job ? await getStore().getJob(job.id) : null;
     if (currentJob?.cancellationRequested || currentJob?.status === "cancelled") throw new ApiRequestError("Production cancelled.", 409, "production_cancelled");
     if (currentJob && ["news_digest", "explainer"].includes(currentJob.contentType ?? "") && /^(fal:|openai:image|elevenlabs:|vercel:)/.test(input.scope)) {
+      if (usesNaturalDuration(currentJob) && (currentJob.durationPlan?.needsReview || currentJob.durationPlan?.scopeTooLong)) throw new ApiRequestError("Review the current runtime and cost before generating media.", 409, "duration_review_required");
       for (const gate of ["script", "storyboard"] as const) {
         const version = currentJob.workflowSteps?.find((step) => step.id === gate)?.artifactVersionId;
         if (!version || !currentJob.approvals?.some((approval) => approval.gate === gate && approval.artifactVersionId === version)) {

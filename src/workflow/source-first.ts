@@ -10,6 +10,7 @@ import { isExplicitBreakingClaim } from "@/lib/news-claims";
 import { narrationWordBudget } from "@/lib/hybrid-visuals";
 import { validateTimeline } from "@/lib/production";
 import { isSourceMetadata, selectExplainerUnits, sourceSentences } from "@/lib/source-content";
+import { estimateNaturalSeconds, sourceCoverageOutline, usesNaturalDuration } from "@/lib/editorial-duration";
 
 export type SourceFirstDraft = {
   sourceBundle: SourceBundle;
@@ -23,14 +24,30 @@ export type SourceFirstDraft = {
 
 export type SourceFirstOutlineScene = SourceFirstDraft["outline"][number];
 
+function groupCoverageUnits<T extends { sentence: string; claimId?: string }>(units: T[], coverage: ReturnType<typeof sourceCoverageOutline>) {
+  const roles = new Map(coverage.map((point) => [point.claimId, point.role]));
+  const groups: T[][] = [];
+  for (const unit of units) {
+    const last = groups.at(-1);
+    const sameConcept = last && roles.get(last[0].claimId ?? "") === roles.get(unit.claimId ?? "");
+    if (last && ((sameConcept && last.reduce((n, item) => n + item.sentence.split(/\s+/).length, 0) < 80) || groups.length >= 40)) last.push(unit);
+    else groups.push([unit]);
+  }
+  return groups;
+}
+
 export function buildSourceFirstDraft(
   productionId: string,
   input: ProductionCreateRequest,
   now = new Date().toISOString(),
   preferredOutline?: SourceFirstOutlineScene[],
+  wordsPerSecond?: number,
 ): SourceFirstDraft {
-  const supportedClaims = input.sourceBundle.claims.filter((claim) => claim.status === "supported" && claim.editorialStatus !== "excluded");
-  const sourceUnits: Array<{ sentence: string; sourceId: string; kind: string; claimId?: string; sourceIds?: string[] }> = input.contentType === "explainer" && supportedClaims.length
+  const natural = usesNaturalDuration(input);
+  const coverage = natural ? sourceCoverageOutline(input.sourceBundle, input.excludedClaimIds) : [];
+  const supportedClaims = input.sourceBundle.claims.filter((claim) => natural ? coverage.some((point) => point.claimId === claim.id && point.included) : claim.status === "supported" && claim.editorialStatus !== "excluded");
+  if (natural && coverage.length > 0 && supportedClaims.length === 0) throw new Error("Select at least one supported source point for the outline.");
+  const sourceUnits: Array<{ sentence: string; sourceId: string; kind: string; claimId?: string; sourceIds?: string[] }> = (input.contentType === "explainer" || natural) && supportedClaims.length
     ? supportedClaims.map((claim) => ({ sentence: claim.text, sourceId: claim.sourceIds[0], sourceIds: claim.sourceIds, kind: "text", claimId: claim.id }))
     : input.sourceBundle.inputs.flatMap((source) => {
     const text = source.kind === "text" ? source.text : source.extractedText;
@@ -43,16 +60,17 @@ export function buildSourceFirstDraft(
   }
 
   const targetWords = narrationWordBudget(input.targetDurationSeconds);
-  const selected = input.contentType === "explainer" ? selectExplainerUnits(sourceUnits, targetWords) : selectToWordBudget(sourceUnits, targetWords);
+  const selected = natural ? sourceUnits : input.contentType === "explainer" ? selectExplainerUnits(sourceUnits, targetWords) : selectToWordBudget(sourceUnits, targetWords);
   if (!selected.length) throw new Error("The source cannot form a complete narration within this duration. Supply concise notes or increase the duration.");
   const sceneCount = Math.min(40, Math.max(input.contentType === "news_digest" ? 6 : 3, Math.round(input.targetDurationSeconds / 10)));
-  const grouped = partition(selected, Math.min(sceneCount, selected.length));
+  // Keep conceptual chapters together. Runtime never determines their count.
+  const grouped = natural ? groupCoverageUnits(selected, coverage) : partition(selected, Math.min(sceneCount, selected.length));
   const outline = preferredOutline ?? grouped.map((group, index) => {
     const narration = group.map((unit) => unit.sentence).join(" ");
     const id = `scene-${String(index + 1).padStart(2, "0")}`;
     return {
       id,
-      title: sceneTitle(narration, index),
+      title: natural ? naturalSceneTitle(narration, coverage.find((point) => point.claimId === group[0]?.claimId)?.role) : sceneTitle(narration, index),
       narration,
       visual: visualTreatmentFor(narration, index),
       claimIds: group.every((unit) => unit.claimId) ? group.map((unit) => unit.claimId!) : splitSentences(narration).map((_, sentenceIndex) => `claim-${id}-${sentenceIndex + 1}`),
@@ -60,7 +78,7 @@ export function buildSourceFirstDraft(
     };
   });
   const script = outline.map((scene) => scene.narration).join("\n\n");
-  const durationMs = input.targetDurationSeconds * 1_000;
+  const durationMs = (natural ? estimateNaturalSeconds(outline, wordsPerSecond) : input.targetDurationSeconds) * 1_000;
   const timeline = buildGraphicsTimeline(productionId, input, outline, durationMs, now);
   const sourceBundle = withDerivedClaims(input.sourceBundle, input.contentType, outline, now);
   const qaReport = validateTimeline({ timeline, sourceBundle, checkedAt: now });
@@ -98,10 +116,12 @@ function buildGraphicsTimeline(
   durationMs: number,
   compiledAt: string,
 ): TimelineManifestV2 {
+  const weights = outline.map((scene) => Math.max(1, scene.narration.split(/\s+/).length));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   const baseDuration = Math.floor(durationMs / outline.length);
   let cursor = 0;
   const graphics = outline.map((scene, index) => {
-    const endMs = index === outline.length - 1 ? durationMs : cursor + baseDuration;
+    const endMs = index === outline.length - 1 ? durationMs : cursor + (usesNaturalDuration(input) ? Math.floor(durationMs * weights[index] / totalWeight) : baseDuration);
     const segment = {
       id: scene.id,
       trackId: "graphics-main",
@@ -236,6 +256,14 @@ function partition<T>(items: T[], groupCount: number): T[][] {
     groups.push(items.slice(start, Math.max(start + 1, end)));
   }
   return groups.filter((group) => group.length > 0);
+}
+
+function naturalSceneTitle(narration: string, role?: string) {
+  const sentences = sourceSentences(narration);
+  const concise = sentences.find((sentence) => sentence.split(/\s+/).length <= 7);
+  if (concise) return concise;
+  return role === "mechanism" ? "How the method works" : role === "evidence" ? "What the evidence shows"
+    : role === "limitation" ? "Limits of the findings" : role === "core" ? "The central idea" : "Supporting context";
 }
 
 function sceneTitle(narration: string, index: number) {

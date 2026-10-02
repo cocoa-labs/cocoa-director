@@ -66,6 +66,7 @@ export type JobPatch = Partial<
     | "visualStylePreset"
     | "visualPlan"
     | "editorialPlan"
+    | "durationPlan"
     | "storyboard"
     | "approvals"
     | "timelineManifest"
@@ -1329,6 +1330,7 @@ class PostgresStore implements VideoStore {
       visual_style_preset = ${next.visualStylePreset ?? "auto"},
       visual_plan = ${JSON.stringify(next.visualPlan ?? null)}::jsonb,
       editorial_plan = ${JSON.stringify(next.editorialPlan ?? null)}::jsonb,
+      duration_plan = ${JSON.stringify(next.durationPlan ?? null)}::jsonb,
       storyboard = ${JSON.stringify(next.storyboard ?? null)}::jsonb,
       approvals = ${JSON.stringify(next.approvals ?? [])}::jsonb,
       timeline_manifest = ${JSON.stringify(next.timelineManifest ?? null)}::jsonb,
@@ -2096,6 +2098,7 @@ function fromDbRow(
     visualStylePreset: (row.visual_style_preset as VideoJob["visualStylePreset"]) ?? "auto",
     visualPlan: parseJson<VideoJob["visualPlan"]>(row.visual_plan),
     editorialPlan: parseJson<VideoJob["editorialPlan"]>(row.editorial_plan),
+    durationPlan: parseJson<VideoJob["durationPlan"]>(row.duration_plan),
     storyboard: parseJson<VideoJob["storyboard"]>(row.storyboard),
     approvals: parseJson<VideoJob["approvals"]>(row.approvals) ?? [],
     timelineManifest: parseJson<VideoJob["timelineManifest"]>(row.timeline_manifest),

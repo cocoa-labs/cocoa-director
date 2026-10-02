@@ -1,7 +1,9 @@
-import { editorialSurfaceColors, editorialTextSvg, fitEditorialText, sourceCardSvg } from "@/lib/server/editorial-graphics";
+import { naturalEditorialAllowance } from "@/lib/editorial-costs";
+import { editorialScoreFilters } from "@/lib/editorial-score";
+import { closingTakeawaySvg, readableEditorialMessage, fitCompleteEditorialText, editorialSurfaceColors, editorialTextSvg, fitEditorialText, sourceCardSvg } from "@/lib/server/editorial-graphics";
 import { outlineEditorialText, renderFontFiles } from "@/lib/server/render-fonts";
-import { reserveProviderAttempt } from "@/lib/server/budget-ledger";
-import { randomUUID } from "node:crypto";
+import { productionBudgetSnapshot, reserveProviderAttempt } from "@/lib/server/budget-ledger";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,8 +24,9 @@ import type {
   WorkflowStep,
 } from "@/lib/schemas";
 import { timelineToSrt, timelineToVtt } from "@/lib/captions";
-import { narrationBudgetSummary, DEFAULT_NARRATION_WORDS_PER_SECOND } from "@/lib/hybrid-visuals";
-import { applyTimingPlan, compileEditorialTimingPlan } from "@/lib/editorial-timing";
+import { narrationBudgetSummary, DEFAULT_NARRATION_WORDS_PER_SECOND, recalculateHybridVisualPlan } from "@/lib/hybrid-visuals";
+import { applyTimingPlan, compileEditorialTimingPlan, compileNaturalEditorialTiming } from "@/lib/editorial-timing";
+import { resolveDurationPlan, usesNaturalDuration } from "@/lib/editorial-duration";
 import { MAX_EDITORIAL_NARRATION_RATE, MIN_EDITORIAL_NARRATION_RATE } from "@/lib/editorial-pacing";
 import { editorialNarrationTiming } from "@/lib/editorial-narration";
 import { validateTimeline } from "@/lib/production";
@@ -48,8 +51,16 @@ type RenderBeat = {
 };
 
 const FPS = 30;
-const EDITORIAL_RENDER_VERSION = "bundled-fonts-document-fit-v3";
+const EDITORIAL_RENDER_VERSION = "natural-duration-closing-v4";
 const MAX_NARRATION_OVERRUN = 1.05;
+
+export function narrationFingerprint(text: string, voiceId?: string) {
+  return createHash("sha256").update(JSON.stringify({ text: text.replace(/\s+/g, " ").trim(),
+    voice: voiceId ?? process.env.ELEVENLABS_NEWS_VOICE_ID ?? process.env.ELEVENLABS_VOICE_ID ?? "JBFqnCBsd6RMkjVDRZzb",
+    model: process.env.ELEVENLABS_TTS_MODEL_ID ?? "eleven_multilingual_v2",
+    mode: getProviderMode(), settings: { stability: 0.55, similarity_boost: 0.75, style: 0.18, use_speaker_boost: true },
+  })).digest("hex");
+}
 
 export async function generateNarrationScene(videoId: string, sceneId: string) {
   const store = getStore();
@@ -59,8 +70,12 @@ export async function generateNarrationScene(videoId: string, sceneId: string) {
   if (!job || !scene) throw new Error(`Narration scene not found: ${sceneId}`);
   const scriptVersion = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId ?? "script";
   const media = await store.listJobMedia(videoId);
-  const existing = media.assets.find((asset) => asset.role === "narration_scene" && asset.metadata.sceneId === sceneId && asset.metadata.scriptVersion === scriptVersion);
-  if (existing) return existing;
+  const fingerprint = narrationFingerprint(scene.narration, job.durationPlan?.voiceId);
+  const existing = media.assets.find((asset) => asset.role === "narration_scene" && asset.metadata.sceneId === sceneId && asset.metadata.scriptVersion === scriptVersion && (!asset.metadata.narrationFingerprint || asset.metadata.narrationFingerprint === fingerprint));
+  if (existing && (!existing.metadata.narrationFingerprint || existing.metadata.narrationFingerprint === fingerprint)) return existing;
+  const reusable = media.assets.find((asset) => asset.role === "narration_scene" && asset.metadata.narrationFingerprint === fingerprint);
+  if (reusable) return store.createMediaAsset({ projectId: job.projectId, videoJobId: videoId, generationId: reusable.generationId, kind: "music", role: "narration_scene", url: reusable.url, mimeType: reusable.mimeType,
+    metadata: { ...reusable.metadata, sceneId, sceneIndex, scriptVersion, reusedFromAssetId: reusable.id } });
   const narration = await synthesizeNarration(scene.narration, job, sceneIndex);
   const extension = narration.contentType === "audio/mpeg" ? "mp3" : "wav";
   const blob = await uploadPublicBlob({
@@ -98,7 +113,7 @@ export async function generateNarrationScene(videoId: string, sceneId: string) {
     role: "narration_scene",
     url: blob.url,
     mimeType: narration.contentType,
-    metadata: { sceneId, sceneIndex, scriptVersion, durationMs: narration.durationMs, words: narration.words },
+    metadata: { sceneId, sceneIndex, scriptVersion, narrationFingerprint: fingerprint, durationMs: narration.durationMs, words: narration.words },
   });
 }
 
@@ -106,16 +121,18 @@ export async function reconcileEditorialTiming(videoId: string) {
   const store = getStore();
   const job = await store.getJob(videoId);
   if (!job?.storyboard || !job.visualPlan) throw new Error("Editorial storyboard and visual plan are required before timing reconciliation.");
-  if (!isEditorialTimingV2Enabled()) return { requiresScriptRevision: false as const, timingPlan: undefined, storyboard: job.storyboard, visualPlan: job.visualPlan };
+  const natural = usesNaturalDuration(job);
+  if (!isEditorialTimingV2Enabled() && !natural) return { requiresScriptRevision: false as const, timingPlan: undefined, storyboard: job.storyboard, visualPlan: job.visualPlan };
   const scriptVersion = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId ?? "script";
   const media = await store.listJobMedia(videoId);
   const measured = job.storyboard.scenes.map((scene) => {
-    const asset = media.assets.find((candidate) => candidate.role === "narration_scene" && candidate.metadata.sceneId === scene.id && candidate.metadata.scriptVersion === scriptVersion);
+    const asset = media.assets.find((candidate) => candidate.role === "narration_scene" && candidate.metadata.sceneId === scene.id && candidate.metadata.scriptVersion === scriptVersion && (!candidate.metadata.narrationFingerprint || candidate.metadata.narrationFingerprint === narrationFingerprint(scene.narration, job.durationPlan?.voiceId)));
     const durationMs = Number(asset?.metadata.durationMs);
     if (!asset || !Number.isFinite(durationMs) || durationMs <= 0) throw new Error(`Measured narration is missing for ${scene.id}.`);
     return { sceneId: scene.id, durationMs: Math.round(durationMs) };
   });
-  const timingPlan = compileEditorialTimingPlan({
+  const compileTiming = natural ? compileNaturalEditorialTiming : compileEditorialTimingPlan;
+  const timingPlan = compileTiming({
     productionId: job.id,
     scriptVersionId: scriptVersion,
     storyboard: job.storyboard,
@@ -123,6 +140,32 @@ export async function reconcileEditorialTiming(videoId: string) {
     targetDurationMs: job.durationSeconds * 1_000,
     compiledAt: new Date().toISOString(),
   });
+  if (natural && job.durationPlan) {
+    const timed = timingPlan.targetDurationMs > 600_000
+      ? { storyboard: job.storyboard, plan: { ...job.visualPlan, timingPlan } }
+      : applyTimingPlan(job.storyboard, job.visualPlan, timingPlan);
+    const visualPlan = recalculateHybridVisualPlan(isSourceVisualsV2Enabled() && job.sourceBundle ? attachAuthenticSourceVisuals(timed.plan, job.sourceBundle) : timed.plan);
+    const words = job.storyboard.scenes.reduce((n, scene) => n + scene.narration.split(/\s+/).filter(Boolean).length, 0);
+    visualPlan.narrationWordsPerSecond = words / (timingPlan.coverage.spokenDurationMs / 1_000);
+    const storyboard = { ...timed.storyboard, scenes: timed.storyboard.scenes.map((scene) => ({ ...scene, beats: visualPlan.beats.filter((beat) => beat.sceneId === scene.id) })) };
+    const seconds = timingPlan.targetDurationMs / 1_000;
+    const remainingMediaCost = naturalEditorialAllowance({ plan: visualPlan, aspectRatio: job.aspectRatio, durationSeconds: seconds, scoreReady: media.assets.some((asset) => asset.role === "music_track") });
+    const allowance = await productionBudgetSnapshot(videoId);
+    const resolved = resolveDurationPlan(job.durationPlan, seconds, remainingMediaCost, timingPlan.compiledAt);
+    const budgetBlocked = allowance !== undefined && remainingMediaCost > allowance.remainingCents;
+    const durationPlan = { ...resolved, needsReview: resolved.needsReview || budgetBlocked,
+      rationale: budgetBlocked ? "The measured timeline exceeds the remaining approved allowance. Review the updated cost before further media calls. Completed assets and narration are saved." : resolved.rationale };
+    const version = durationPlan.needsReview ? randomUUID() : undefined;
+    const workflowSteps = version ? (job.workflowSteps ?? []).map((step): WorkflowStep => step.id === "storyboard" ? { ...step, artifactVersionId: version, state: "complete" }
+      : step.id === "storyboard_approval" || step.id === "timing_reconciliation" ? { ...step, state: "awaiting_user", error: durationPlan.rationale, completedAt: undefined } : step) : job.workflowSteps;
+    await store.updateJob(videoId, { storyboard, visualPlan, durationPlan, durationSeconds: seconds,
+      ...(version ? { status: "awaiting_user" as const, error: durationPlan.rationale, workflowSteps, estimatedCostCents: remainingMediaCost,
+        approvals: (job.approvals ?? []).filter((approval) => approval.gate !== "storyboard"),
+        artifactVersions: [...job.artifactVersions, { id: version, scope: "storyboard", label: "Measured runtime proposal", payload: storyboard, urls: {}, createdAt: timingPlan.compiledAt }] } : {}),
+    });
+    if (durationPlan.needsReview) await heartbeatLatestRun(videoId, "awaiting_user", durationPlan.rationale);
+    return { requiresScriptRevision: durationPlan.needsReview, timingPlan, storyboard, visualPlan };
+  }
   const narrationTiming = editorialNarrationTiming({ ...job, visualPlan: { ...job.visualPlan, timingPlan } });
   const measuredPlan = { ...job.visualPlan, timingPlan, narrationWordsPerSecond: narrationTiming.pacing?.wordsPerSecond };
   if (!timingPlan.coverage.passed) {
@@ -358,13 +401,15 @@ export async function generateNewsDelivery(videoId: string) {
   });
 }
 
+async function missingNaturalNarration(sceneId: string): Promise<SceneNarration> { throw new Error(`Recorded narration is missing for ${sceneId}. Resume narration before rendering.`); }
+
 async function loadSceneAssets(job: VideoJob, storyboard: NewsStoryboard) {
   const sceneAssets = new Array<SceneAsset>(storyboard.scenes.length);
   for (let index = 0; index < storyboard.scenes.length; index += 4) {
     const completed = await Promise.all(storyboard.scenes.slice(index, index + 4).map(async (scene, batchIndex) => ({
       index: index + batchIndex,
       asset: {
-        narration: await existingNarrationForScene(job, scene.id) ?? await synthesizeNarration(scene.narration, job, index + batchIndex),
+        narration: await existingNarrationForScene(job, scene.id) ?? (usesNaturalDuration(job) ? await missingNaturalNarration(scene.id) : await synthesizeNarration(scene.narration, job, index + batchIndex)),
         targetDurationMs: scene.endMs - scene.startMs,
       },
     })));
@@ -377,7 +422,7 @@ async function synthesizeNarration(text: string, job: VideoJob, sceneIndex: numb
   if (getProviderMode() !== "live") return mockNarration(text);
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) throw new Error("ELEVENLABS_API_KEY is required for editorial narration.");
-  const voiceId = process.env.ELEVENLABS_NEWS_VOICE_ID ?? process.env.ELEVENLABS_VOICE_ID ?? "JBFqnCBsd6RMkjVDRZzb";
+  const voiceId = job.durationPlan?.voiceId ?? process.env.ELEVENLABS_NEWS_VOICE_ID ?? process.env.ELEVENLABS_VOICE_ID ?? "JBFqnCBsd6RMkjVDRZzb";
   const startedAt = Date.now();
   await reserveProviderAttempt({ scope: "elevenlabs:narration", videoId: job.id,
     key: `${job.id}:${job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId ?? "script"}:${sceneIndex}`,
@@ -405,18 +450,30 @@ async function synthesizeNarration(text: string, job: VideoJob, sceneIndex: numb
     alignment?: { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] };
     normalized_alignment?: { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] };
   };
+  const audio = Buffer.from(payload.audio_base64, "base64");
   const alignment = payload.normalized_alignment ?? payload.alignment;
-  const words = alignment ? wordsFromCharacterAlignment(alignment) : distributeWords(text, estimateNarrationDuration(text));
-  const durationMs = Math.max(1_000, (words.at(-1)?.endMs ?? estimateNarrationDuration(text)) + 250);
+  let words = alignment ? wordsFromCharacterAlignment(alignment) : distributeWords(text, estimateNarrationDuration(text));
+  let durationMs = Math.max(1_000, (words.at(-1)?.endMs ?? estimateNarrationDuration(text)) + 250);
+  if (usesNaturalDuration(job)) {
+    const directory = await mkdtemp(join(tmpdir(), "cocoa-narration-probe-"));
+    try {
+      const path = join(directory, "voice.mp3");
+      await writeFile(path, audio);
+      const probe = await probeMediaFile(path);
+      durationMs = Math.max(Math.ceil(probe.durationSeconds * 1_000), words.at(-1)?.endMs ?? 0);
+      if (!alignment) words = distributeWords(text, Math.max(1, durationMs - 250));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
   const costCents = estimatedTtsCostCents(text);
   await getStore().addProviderCall({ videoJobId: job.id, phaseNumber: 4, provider: "elevenlabs", model: process.env.ELEVENLABS_TTS_MODEL_ID ?? "eleven_multilingual_v2", requestId, idempotencyKey: ttsIdempotencyKey, latencyMs: Date.now() - startedAt, costCents, status: "success" });
-  return { audio: Buffer.from(payload.audio_base64, "base64"), durationMs, words, contentType: "audio/mpeg", costCents, requestId };
+  return { audio, durationMs, words, contentType: "audio/mpeg", costCents, requestId };
 }
 
 async function existingNarrationForScene(job: VideoJob, sceneId: string): Promise<SceneNarration | undefined> {
   const scriptVersion = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId ?? "script";
   const media = await getStore().listJobMedia(job.id);
-  const asset = media.assets.find((candidate) => candidate.role === "narration_scene" && candidate.metadata.sceneId === sceneId && candidate.metadata.scriptVersion === scriptVersion);
+  const scene = job.storyboard?.scenes.find((candidate) => candidate.id === sceneId);
+  const asset = media.assets.find((candidate) => candidate.role === "narration_scene" && candidate.metadata.sceneId === sceneId && candidate.metadata.scriptVersion === scriptVersion && (!candidate.metadata.narrationFingerprint || (scene && candidate.metadata.narrationFingerprint === narrationFingerprint(scene.narration, job.durationPlan?.voiceId))));
   if (asset) {
     const words = Array.isArray(asset.metadata.words) ? asset.metadata.words.filter(isWordTiming) : [];
     return {
@@ -428,6 +485,7 @@ async function existingNarrationForScene(job: VideoJob, sceneId: string): Promis
       requestId: media.generations.find((generation) => generation.id === asset.generationId)?.requestId,
     };
   }
+  if (usesNaturalDuration(job)) return undefined;
   const segment = job.timelineManifest?.tracks.find((track) => track.kind === "narration")?.segments.find((candidate) => candidate.metadata.sceneId === sceneId && candidate.sourceUrl);
   if (!segment?.sourceUrl) return undefined;
   const cues = job.timelineManifest?.tracks.find((track) => track.kind === "captions")?.segments.filter((candidate) => candidate.metadata.sceneId === sceneId) ?? [];
@@ -636,6 +694,8 @@ export function compileEditorialTimeline(
       { id: "sfx-main", kind: "sfx", segments: sfx },
     ],
     metadata: {
+      durationMode: job.durationPlan?.mode,
+      endingHoldMs: plan.timingPlan?.pauses.find((pause) => pause.kind === "ending")?.durationMs,
       measuredSpeechBounds: plan.timingPlan?.scenes.map((scene) => ({ sceneId: scene.sceneId, startMs: scene.speechStartMs, endMs: scene.speechEndMs })) ?? [],
       pauseIds: plan.timingPlan?.pauses.map((pause) => pause.id) ?? [],
       sourceFragmentIds: [...new Set(plan.beats.map((beat) => beat.sourceVisual?.fragmentId).filter((value): value is string => Boolean(value)))],
@@ -715,7 +775,7 @@ async function renderBeatBackground(beat: VisualBeat, scene: NewsStoryboard["sce
   const { background, surface } = editorialSurfaceColors(colors);
   if (beat.sourceVisual && isLayeredEditorialCompositorEnabled()) {
     const metric = beat.graphicSpec && "values" in beat.graphicSpec ? beat.graphicSpec.values[0] : undefined;
-    return sharp(outlineEditorialText(sourceCardSvg(beat.sourceVisual, scene.title, width, height, colors, metric))).png().toBuffer();
+    return sharp(outlineEditorialText(sourceCardSvg(beat.sourceVisual, scene.title, width, height, colors, metric, usesNaturalDuration(job) ? readableEditorialMessage(scene.title, beat.sourceVisual.excerpt, beat.endMs - beat.startMs) : undefined))).png().toBuffer();
   }
   const nodes = Array.from({ length: 22 }, (_, index) => {
     const x = ((index * 137) % 1000) / 1000 * width;
@@ -746,10 +806,18 @@ async function renderBeatOverlay(beat: VisualBeat, scene: NewsStoryboard["scenes
   const placement = height > width ? "left" : beat.graphicSpec?.overlayPlacement ?? (beat.index % 2 === 0 ? "left" : "right");
   const textX = placement === "right" ? width * 0.56 : width * 0.1;
   const ruleX = placement === "right" ? width * 0.525 : width * 0.065;
-  const directedTitle = fitEditorialText(scene.title, width * .9 - textX, Math.min(width, height) * .057, 2, 700);
+  const directedTitle = (usesNaturalDuration(job) ? fitCompleteEditorialText : fitEditorialText)(scene.title, width * .9 - textX, Math.min(width, height) * .057, 2, 700);
   const disclosure = beat.disclosure.required
     ? `<rect x="${width * 0.06}" y="${height * 0.055}" width="${width * 0.4}" height="${height * 0.048}" rx="${height * 0.012}" fill="#ffb85c" fill-opacity=".94"/><text x="${width * 0.08}" y="${height * 0.087}" fill="#11151a" font-family="Arial" font-size="${Math.round(height * 0.019)}" font-weight="800" letter-spacing="1">${escapeXml(beat.disclosure.label ?? "AI-GENERATED REENACTMENT")}</text>`
     : "";
+  if (beat.sourceVisual && usesNaturalDuration(job)) {
+    const hasSourceCard = !hasDocumentPage && isLayeredEditorialCompositorEnabled() && !beat.assets.some((asset) => asset.status === "ready" && asset.url);
+    if (hasSourceCard) return sharp({ create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
+    const message = readableEditorialMessage(scene.title, beat.sourceVisual.excerpt, beat.endMs - beat.startMs);
+    const text = message.kind === "quotation" ? `“${message.text}”` : message.text;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect x="${width * .07}" y="${height * .47}" width="${width * .86}" height="${height * .3}" rx="18" fill="#07110e" fill-opacity=".92"/>${editorialTextSvg(fitCompleteEditorialText(text, width * .76, Math.min(width, height) * .046, 4, 700), width * .12, height * .55, "#f4f7f5", 700)}${editorialTextSvg(fitEditorialText(`${message.kind === "quotation" ? "Source quotation" : "Paraphrase"} · ${beat.sourceVisual.domain ?? "Supplied source"}`, width * .76, Math.min(width, height) * .021, 1), width * .12, height * .74, accent)}</svg>`;
+    return sharp(outlineEditorialText(svg)).png().toBuffer();
+  }
   if (beat.sourceVisual) {
     const hasSourceCard = !hasDocumentPage && isLayeredEditorialCompositorEnabled()
       && !beat.assets.some((asset) => asset.status === "ready" && asset.url && (asset.kind === "image" || asset.kind === "video"));
@@ -792,18 +860,26 @@ async function renderBeatOverlay(beat: VisualBeat, scene: NewsStoryboard["scenes
   return sharp(outlineEditorialText(svg)).png().toBuffer();
 }
 
-async function renderEditorialAssets(videoId: string, job: VideoJob, beats: RenderBeat[], scenes: SceneAsset[], score: Buffer | undefined, transitionSfx: Buffer, captionsAss: string) {
+export async function renderEditorialAssets(videoId: string, job: VideoJob, beats: RenderBeat[], scenes: SceneAsset[], score: Buffer | undefined, transitionSfx: Buffer, captionsAss: string) {
   const { width, height } = dimensions(job.aspectRatio, job.qualityTier === "premium");
+  const natural = usesNaturalDuration(job);
   const args: string[] = ["-y"];
   const files: Array<{ name: string; content: Buffer }> = [];
+  const stages: string[][] = [];
+  const beatInputs: string[][] = [];
   beats.forEach((renderBeat, index) => {
     const baseName = `beat-${index}.${renderBeat.baseType === "video" ? "mp4" : "png"}`;
     const overlayName = `overlay-${index}.png`;
-    if (renderBeat.baseType === "image") args.push("-loop", "1", "-framerate", String(FPS));
-    args.push("-i", baseName, "-loop", "1", "-framerate", String(FPS), "-i", overlayName);
+    const inputs = [...(renderBeat.baseType === "image" ? ["-loop", "1", "-framerate", String(FPS)] : []), "-i", baseName, "-loop", "1", "-framerate", String(FPS), "-i", overlayName];
+    beatInputs.push(inputs);
+    if (!natural) args.push(...inputs);
     files.push({ name: baseName, content: renderBeat.base }, { name: overlayName, content: renderBeat.overlay });
   });
-  const narrationStartIndex = beats.length * 2;
+  if (natural) {
+    args.push("-f", "concat", "-safe", "0", "-i", "visuals.txt");
+    files.push({ name: "visuals.txt", content: Buffer.from(beats.map((_, index) => `file stage-${index}.mp4`).join("\n")) });
+  }
+  const narrationStartIndex = natural ? 1 : beats.length * 2;
   scenes.forEach((scene, index) => {
     const extension = scene.narration.contentType === "audio/mpeg" ? "mp3" : "wav";
     const name = `narration-${index}.${extension}`;
@@ -812,19 +888,25 @@ async function renderEditorialAssets(videoId: string, job: VideoJob, beats: Rend
   });
   const scoreIndex = narrationStartIndex + scenes.length;
   if (score) {
-    args.push("-stream_loop", "-1", "-i", "score.mp3");
+    args.push(...(natural ? [] : ["-stream_loop", "-1"]), "-i", "score.mp3");
     files.push({ name: "score.mp3", content: score });
   }
   const sfxIndex = scoreIndex + (score ? 1 : 0);
   args.push("-i", "transition.wav");
   files.push({ name: "transition.wav", content: transitionSfx });
+  const closingIndex = sfxIndex + 1;
+  if (natural) {
+    args.push("-loop", "1", "-framerate", String(FPS), "-i", "closing.png");
+    files.push({ name: "closing.png", content: await sharp(outlineEditorialText(closingTakeawaySvg(job.durationPlan!.closingTakeaway, width, height, job.visualPlan?.continuityKit.palette ?? []))).png().toBuffer() });
+  }
   files.push({ name: "captions.ass", content: Buffer.from(captionsAss) });
   files.push(...await Promise.all(renderFontFiles.map(async (font) => ({ name: `fonts/${font.name}`, content: await readFile(font.path) }))));
   const filters: string[] = [];
   beats.forEach((renderBeat, index) => {
-    const frames = Math.max(1, Math.round((renderBeat.beat.endMs - renderBeat.beat.startMs) * FPS / 1_000));
+    const frames = Math.max(1, Math.round(renderBeat.beat.endMs * FPS / 1_000) - Math.round(renderBeat.beat.startMs * FPS / 1_000));
     const durationSeconds = frames / FPS;
-    const baseIndex = index * 2;
+    const filterStart = filters.length;
+    const baseIndex = natural ? 0 : index * 2;
     const overlayIndex = baseIndex + 1;
     if (renderBeat.baseType === "video") {
       const sourceSeconds = Math.max(0.001, (renderBeat.measuredDurationMs ?? renderBeat.beat.endMs - renderBeat.beat.startMs) / 1_000);
@@ -837,21 +919,30 @@ async function renderEditorialAssets(videoId: string, job: VideoJob, beats: Rend
     const fadeOutStart = Math.max(0, durationSeconds - 0.18).toFixed(3);
     filters.push(`[${overlayIndex}:v]scale=${width}:${height},format=rgba,trim=duration=${durationSeconds.toFixed(6)},fade=t=in:st=0:d=0.18:alpha=1,fade=t=out:st=${fadeOutStart}:d=0.18:alpha=1,setpts=PTS-STARTPTS[overlay${index}]`);
     filters.push(`[base${index}][overlay${index}]overlay=shortest=1:format=auto,format=yuv420p[v${index}]`);
+    if (natural) stages.push(["-y", ...beatInputs[index], "-filter_complex", filters.splice(filterStart).join(";"), "-map", `[v${index}]`, "-an", "-frames:v", String(frames), "-r", String(FPS), "-c:v", "libx264", "-preset", "fast", "-crf", "16", "-pix_fmt", "yuv420p", `stage-${index}.mp4`]);
   });
-  filters.push(`${beats.map((_, index) => `[v${index}]`).join("")}concat=n=${beats.length}:v=1:a=0[vraw]`);
-  filters.push("[vraw]ass=captions.ass:fontsdir=fonts[v]");
+  filters.push(natural ? "[0:v]setpts=PTS-STARTPTS[vraw]" : `${beats.map((_, index) => `[v${index}]`).join("")}concat=n=${beats.length}:v=1:a=0[vraw]`);
+  if (natural) {
+    const last = job.visualPlan?.timingPlan?.scenes.at(-1);
+    const words = scenes.at(-1)?.narration.words ?? [];
+    const previousStop = words.slice(0, -1).findLastIndex((word) => /[.!?]$/.test(word.text));
+    const closingStart = ((last?.speechStartMs ?? 0) + (words[previousStop + 1]?.startMs ?? 0)) / 1_000;
+    filters.push(`[${closingIndex}:v]format=rgba[closing]`);
+    filters.push(`[vraw][closing]overlay=enable='gte(t,${closingStart.toFixed(3)})':shortest=1[vclosed]`);
+    filters.push("[vclosed]ass=captions.ass:fontsdir=fonts[v]");
+  } else filters.push("[vraw]ass=captions.ass:fontsdir=fonts[v]");
   scenes.forEach((scene, index) => {
     const sceneId = job.storyboard?.scenes[index]?.id;
     const timing = job.visualPlan?.timingPlan?.scenes.find((candidate) => candidate.sceneId === sceneId);
     const targetSeconds = timing ? (timing.speechEndMs - timing.speechStartMs) / 1_000 : scene.targetDurationMs / 1_000;
     const actualSeconds = scene.narration.durationMs / 1_000;
-    const tempo = timing
+    const tempo = natural ? 1 : timing
       ? Math.max(MIN_EDITORIAL_NARRATION_RATE, Math.min(MAX_EDITORIAL_NARRATION_RATE, actualSeconds / Math.max(0.001, targetSeconds)))
       : Math.max(0.97, Math.min(1.03, actualSeconds / Math.max(0.001, targetSeconds)));
     const delayMs = timing?.speechStartMs ?? job.storyboard?.scenes[index]?.startMs ?? 0;
     filters.push(`[${narrationStartIndex + index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${actualSeconds.toFixed(6)},atempo=${tempo.toFixed(6)},adelay=${delayMs}|${delayMs},asetpts=PTS-STARTPTS[n${index}]`);
   });
-  filters.push(`${scenes.map((_, index) => `[n${index}]`).join("")}amix=inputs=${scenes.length}:duration=longest:dropout_transition=0,loudnorm=I=-18:TP=-1.5:LRA=7[narr]`);
+  filters.push(`${scenes.map((_, index) => `[n${index}]`).join("")}amix=inputs=${scenes.length}:duration=longest:dropout_transition=0,loudnorm=I=-18:TP=-1.5:LRA=7,apad,atrim=0:${job.durationSeconds}[narr]`);
   const targetSeconds = job.durationSeconds.toFixed(6);
   const sfxStarts = (job.storyboard?.scenes ?? []).slice(1).map((scene) => scene.startMs);
   if (sfxStarts.length > 0) {
@@ -860,7 +951,15 @@ async function renderEditorialAssets(videoId: string, job: VideoJob, beats: Rend
     filters.push(`${sfxStarts.map((_, index) => `[sfxd${index}]`).join("")}amix=inputs=${sfxStarts.length}:duration=longest:dropout_transition=0[sfxmix]`);
   }
   if (score) {
-    filters.push(`[${scoreIndex}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${targetSeconds},asetpts=PTS-STARTPTS,volume=0.16[music]`);
+    if (natural) {
+      const directory = await mkdtemp(join(tmpdir(), "cocoa-score-probe-"));
+      try {
+        const path = join(directory, "score.mp3");
+        await writeFile(path, score);
+        const probe = await probeMediaFile(path);
+        filters.push(...editorialScoreFilters(`[${scoreIndex}:a]`, probe.durationSeconds, job.durationSeconds));
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    } else filters.push(`[${scoreIndex}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=0:${targetSeconds},asetpts=PTS-STARTPTS,volume=0.16[music]`);
     filters.push("[narr]asplit=2[narr-sidechain][narr-mix]");
     filters.push("[music][narr-sidechain]sidechaincompress=threshold=0.025:ratio=10:attack=18:release=320[ducked]");
     filters.push("[narr-mix][ducked]amix=inputs=2:duration=longest:dropout_transition=0,atrim=0:" + targetSeconds + "[premix]");
@@ -871,24 +970,26 @@ async function renderEditorialAssets(videoId: string, job: VideoJob, beats: Rend
     ? "[premix][sfxmix]amix=inputs=2:duration=first:dropout_transition=0,loudnorm=I=-16:TP=-1.5:LRA=9[a]"
     : "[premix]loudnorm=I=-16:TP=-1.5:LRA=9[a]");
   args.push("-filter_complex", filters.join(";"), "-map", "[v]", "-map", "[a]", "-t", targetSeconds, "-r", String(FPS), "-c:v", "libx264", "-preset", "veryfast", "-crf", job.qualityTier === "premium" ? "18" : "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-metadata", `cocoa-video-id=${videoId}`, "-metadata", "cocoa-provenance=hybrid-editorial-v2", "-movflags", "+faststart", "final.mp4");
-  const video = process.env.VERCEL === "1" ? await renderInSandbox(args, files) : await renderLocally(args, files);
+  const video = process.env.VERCEL === "1" ? await renderInSandbox(args, files, stages) : await renderLocally(args, files, stages);
   console.log(JSON.stringify({ event: "hybrid_editorial_render_succeeded", videoId, visualBeatCount: beats.length, layeredEditorial: isLayeredEditorialCompositorEnabled() }));
   return { video };
 }
 
-async function renderLocally(args: string[], files: Array<{ name: string; content: Buffer }>) {
+async function renderLocally(args: string[], files: Array<{ name: string; content: Buffer }>, stages: string[][] = []) {
   const directory = await mkdtemp(join(tmpdir(), "cocoa-editorial-render-"));
   await mkdir(join(directory, "fonts"));
   try {
     await Promise.all(files.map((file) => writeFile(join(directory, file.name), file.content)));
-    await runCommand((await mediaTools()).ffmpeg, args, directory);
+    const ffmpeg = (await mediaTools()).ffmpeg;
+    for (const stage of stages) await runCommand(ffmpeg, stage, directory);
+    await runCommand(ffmpeg, args, directory);
     return readFile(join(directory, "final.mp4"));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 }
 
-async function renderInSandbox(args: string[], files: Array<{ name: string; content: Buffer }>) {
+async function renderInSandbox(args: string[], files: Array<{ name: string; content: Buffer }>, stages: string[][] = []) {
   const credentials = process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID
     ? { token: process.env.VERCEL_TOKEN, teamId: process.env.VERCEL_TEAM_ID, projectId: process.env.VERCEL_PROJECT_ID }
     : {};
@@ -901,7 +1002,7 @@ async function renderInSandbox(args: string[], files: Array<{ name: string; cont
     await sandbox.mkDir(`${workdir}/fonts`);
     await sandbox.writeFiles([
       { path: `${workdir}/media-tools.mjs`, content: await mediaToolsSource() },
-      { path: `${workdir}/render.mjs`, content: sandboxScript(args) },
+      { path: `${workdir}/render.mjs`, content: sandboxScript(args, stages) },
       ...files.map((file) => ({ path: `${workdir}/${file.name}`, content: file.content })),
     ]);
     await assertSandbox(sandbox, { cmd: "node", args: ["render.mjs"], cwd: workdir }, "Editorial renderer");
@@ -913,8 +1014,8 @@ async function renderInSandbox(args: string[], files: Array<{ name: string; cont
   }
 }
 
-function sandboxScript(args: string[]) {
-  return `import { spawn } from "node:child_process"; import { installMediaTools } from "./media-tools.mjs"; const tools=await installMediaTools(); const args=${JSON.stringify(args)}; const child=spawn(tools.ffmpeg,args,{stdio:["ignore","inherit","inherit"]}); const code=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("close",resolve)}); if(code!==0) throw new Error("ffmpeg exited "+code);`;
+function sandboxScript(args: string[], stages: string[][]) {
+  return `import { spawn } from "node:child_process"; import { installMediaTools } from "./media-tools.mjs"; const tools=await installMediaTools(); const commands=${JSON.stringify([...stages, args])}; for (const args of commands) { const child=spawn(tools.ffmpeg,args,{stdio:["ignore","inherit","inherit"]}); const code=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("close",resolve)}); if(code!==0) throw new Error("ffmpeg exited "+code); }`;
 }
 
 async function assertSandbox(sandbox: Awaited<ReturnType<typeof Sandbox.create>>, command: { cmd: string; args: string[]; cwd: string }, label: string) {
@@ -1068,6 +1169,10 @@ function buildSourceManifest(job: VideoJob, sources: Awaited<ReturnType<ReturnTy
   return {
     version: 2,
     productionId: job.id,
+    durationPlan: job.durationPlan,
+    timingPlan: visualPlan.timingPlan,
+    sourceVisuals: visualPlan.beats.map((beat) => beat.sourceVisual).filter(Boolean),
+    screenMessages: usesNaturalDuration(job) ? visualPlan.beats.filter((beat) => beat.sourceVisual).map((beat) => ({ beatId: beat.id, sourceIds: beat.sourceIds, ...readableEditorialMessage(job.storyboard?.scenes.find((scene) => scene.id === beat.sceneId)?.title ?? "Key idea", beat.sourceVisual?.excerpt, beat.endMs - beat.startMs) })) : [],
     asOf: job.sourceBundle?.asOf,
     generatedAt: new Date().toISOString(),
     sources: sources.map((source) => ({ ...source, blobUrl: undefined, downloadPath: source.kind === "document" ? `/api/projects/${job.projectId}/sources/${source.id}/download` : undefined })),
@@ -1124,7 +1229,7 @@ export function assertNarrationFits(job: VideoJob, assets: SceneAsset[]) {
   const timing = editorialNarrationTiming(job);
   const budget = narrationBudgetSummary(assets.map((asset) => asset.narration.words.map((word) => word.text).join(" ")).join(" "), job.durationSeconds, timing.pacing);
   if (timing.measured && timing.requiresRevision) throw new Error(timing.revisionMessage);
-  if (!timing.measured && !budget.withinBudget) throw new Error(`Narration duration budget failed: ${budget.words} words exceed the ${budget.budgetWords}-word target. Revise and reapprove the script.`);
+  if (!usesNaturalDuration(job) && !timing.measured && !budget.withinBudget) throw new Error(`Narration duration budget failed: ${budget.words} words exceed the ${budget.budgetWords}-word target. Revise and reapprove the script.`);
   assets.forEach((asset, index) => {
     const maximumRate = timing.measured ? MAX_EDITORIAL_NARRATION_RATE : MAX_NARRATION_OVERRUN;
     if (asset.narration.durationMs > asset.targetDurationMs * maximumRate + 1) {
@@ -1133,7 +1238,7 @@ export function assertNarrationFits(job: VideoJob, assets: SceneAsset[]) {
   });
 }
 
-function timelineToAss(timeline: TimelineManifestV2, aspectRatio: VideoJob["aspectRatio"]) {
+export function timelineToAss(timeline: TimelineManifestV2, aspectRatio: VideoJob["aspectRatio"]) {
   const dimensionsValue = dimensions(aspectRatio, false);
   const cues = captionSegments(timeline);
   const events = cues.map((cue) => `Dialogue: 0,${assTime(cue.startMs)},${assTime(cue.endMs)},Default,,0,0,0,,${escapeAss(String(cue.metadata.text ?? ""))}`).join("\n");

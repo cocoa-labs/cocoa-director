@@ -1,12 +1,14 @@
 import { compileEditorialTimingPlan, spokenScriptText } from "@/lib/editorial-timing";
 import { DEFAULT_NARRATION_WORDS_PER_SECOND, narrationBudgetSummary, type NarrationPacing } from "@/lib/hybrid-visuals";
 import type { VideoJob } from "@/lib/schemas";
+import { usesNaturalDuration } from "@/lib/editorial-duration";
 
 /** One timing decision for the approval UI, approval gate, and recovery writer. */
 export function editorialNarrationTiming(job: VideoJob) {
   const titles = job.storyboard?.scenes.map((scene) => scene.title) ?? [];
   const narration = spokenScriptText(job.script ?? job.storyboard?.scenes.map((scene) => scene.narration).join(" ") ?? "", titles);
   const estimate = narrationBudgetSummary(narration, job.durationSeconds);
+  const natural = usesNaturalDuration(job);
   const plan = job.visualPlan?.timingPlan;
   const scriptVersionId = job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId;
   const scriptVersion = job.artifactVersions.find((version) => version.id === scriptVersionId);
@@ -29,7 +31,8 @@ export function editorialNarrationTiming(job: VideoJob) {
   const pacing: NarrationPacing | undefined = wordsPerSecond
     ? { wordsPerSecond, sceneCount: job.storyboard?.scenes.length }
     : undefined;
-  const budget = narrationBudgetSummary(narration, job.durationSeconds, pacing ?? { wordsPerSecond: DEFAULT_NARRATION_WORDS_PER_SECOND, sceneCount: job.storyboard?.scenes.length });
+  const fixedBudget = narrationBudgetSummary(narration, job.durationSeconds, pacing ?? { wordsPerSecond: DEFAULT_NARRATION_WORDS_PER_SECOND, sceneCount: job.storyboard?.scenes.length });
+  const budget = natural ? { ...fixedBudget, withinBudget: true, minimumWords: 0, minimumCoverage: 0 } : fixedBudget;
   const revisionMessage = timing && !timing.coverage.passed
     ? canFitRecording
       ? `Recorded narration is ${(measuredMs / 1_000).toFixed(1)} seconds. Fit the existing recording to duration with a small pacing adjustment; the script, citations, and voice take are retained.`
@@ -51,6 +54,10 @@ export function editorialNarrationTiming(job: VideoJob) {
 
 export function editorialReviewStatus(job: VideoJob) {
   if (!["news_digest", "explainer"].includes(job.contentType ?? "") || job.status !== "awaiting_user") return undefined;
+  if (usesNaturalDuration(job) && job.durationPlan?.needsReview) return {
+    title: job.durationPlan.scopeTooLong ? "Narrow the scope" : "Review the proposed runtime",
+    detail: job.durationPlan.rationale,
+  };
   const timing = editorialNarrationTiming(job);
   if (timing.requiresRevision) return {
     title: timing.canFitRecording ? "Timing adjustment needed" : "Script revision needed",

@@ -201,11 +201,11 @@ export const EditorialPause = z.object({
   afterSceneId: z.string().min(1).optional(),
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().positive(),
-  durationMs: z.number().int().positive().max(1_500),
-  kind: z.enum(["transition", "chapter"]),
+  durationMs: z.number().int().positive().max(30_000),
+  kind: z.enum(["transition", "chapter", "ending"]),
   reason: z.string().trim().min(1).max(300),
   approved: z.boolean().default(false),
-}).refine((pause) => pause.endMs > pause.startMs && pause.endMs - pause.startMs === pause.durationMs, "Editorial pause timestamps must match durationMs");
+}).refine((pause) => pause.endMs > pause.startMs && pause.endMs - pause.startMs === pause.durationMs && (pause.kind === "ending" || pause.durationMs <= 1_500), "Editorial pause timestamps must match durationMs and the pause policy");
 export type EditorialPause = z.infer<typeof EditorialPause>;
 
 export const NarrationCoverageReport = z.object({
@@ -241,7 +241,7 @@ export const SourceVisualReport = z.object({
 export type SourceVisualReport = z.infer<typeof SourceVisualReport>;
 
 export const EditorialTimingPlan = z.object({
-  version: z.literal(2),
+  version: z.union([z.literal(2), z.literal(3)]),
   productionId: z.string().uuid(),
   scriptVersionId: z.string().optional(),
   targetDurationMs: z.number().int().positive(),
@@ -547,7 +547,7 @@ export const StoryboardScene = EditorialScene.extend({
   sourceVisualId: z.string().optional(),
   syntheticLabelRequired: z.boolean().default(false),
   citationLabels: z.array(z.string().min(1).max(160)).default([]),
-  beats: z.array(VisualBeat).max(24).default([]),
+  beats: z.array(VisualBeat).max(400).default([]),
 });
 export type StoryboardScene = z.infer<typeof StoryboardScene>;
 
@@ -648,6 +648,8 @@ export const TimelineManifestV2 = z.object({
   aspectRatio: AspectRatio,
   tracks: z.array(TimelineTrack).min(1),
   metadata: z.object({
+    durationMode: z.enum(["auto", "target", "fixed"]).optional(),
+    endingHoldMs: z.number().int().nonnegative().optional(),
     measuredSpeechBounds: z.array(z.object({ sceneId: z.string().min(1), startMs: z.number().int().nonnegative(), endMs: z.number().int().positive() })).default([]),
     pauseIds: z.array(z.string().min(1)).default([]),
     sourceFragmentIds: z.array(z.string().min(1)).default([]),
@@ -837,6 +839,37 @@ export const BrandKit = z.object({
 });
 export type BrandKit = z.infer<typeof BrandKit>;
 
+export const DurationMode = z.enum(["auto", "target", "fixed"]);
+export type DurationMode = z.infer<typeof DurationMode>;
+export const EditorialCoveragePoint = z.object({
+  claimId: z.string(),
+  sourceIds: z.array(z.string()),
+  text: z.string(),
+  role: z.enum(["core", "mechanism", "evidence", "limitation", "detail"]),
+  priority: z.enum(["essential", "supporting"]),
+  included: z.boolean(),
+  reason: z.string(),
+});
+export const EditorialDurationPlan = z.object({
+  version: z.literal(1),
+  mode: DurationMode,
+  voiceId: z.string().optional(),
+  excludedClaimIds: z.array(z.string()).optional(),
+  requestedTargetSeconds: z.number().int().min(15).max(600).optional(),
+  tolerance: z.number().min(0).max(0.5).default(0.2),
+  estimatedDurationSeconds: z.number().int().positive(),
+  resolvedDurationSeconds: z.number().int().positive().optional(),
+  approvedDurationSeconds: z.number().int().positive().optional(),
+  approvedCostCents: z.number().int().nonnegative().optional(),
+  needsReview: z.boolean(),
+  scopeTooLong: z.boolean(),
+  rationale: z.string(),
+  coverage: z.array(EditorialCoveragePoint),
+  closingTakeaway: z.string(),
+  updatedAt: z.string(),
+});
+export type EditorialDurationPlan = z.infer<typeof EditorialDurationPlan>;
+
 export const ProductionCreateRequest = z.object({
   contentType: ContentType.default("music_video"),
   projectId: z.string().uuid().optional(),
@@ -848,6 +881,9 @@ export const ProductionCreateRequest = z.object({
   presentationMode: PresentationMode.default("faceless"),
   visualStylePreset: VisualStylePreset.default("auto"),
   targetDurationSeconds: z.number().int().min(15).max(600).default(90),
+  // Omitted policy is deliberately legacy fixed, including restored API clients.
+  durationMode: DurationMode.default("fixed"),
+  excludedClaimIds: z.array(z.string().min(1)).max(500).default([]),
   briefDurationHintSeconds: z.number().int().min(15).max(600).optional(),
   aspectRatio: AspectRatio.default("16:9"),
   language: z.string().trim().min(2).max(20).default("en"),
@@ -1852,6 +1888,7 @@ export const VideoJob = z.object({
   visualStylePreset: VisualStylePreset.optional(),
   visualPlan: HybridVisualPlanV2.optional(),
   editorialPlan: EditorialPlan.optional(),
+  durationPlan: EditorialDurationPlan.optional(),
   storyboard: NewsStoryboard.optional(),
   approvals: z.array(ProductionApproval).optional(),
   timelineManifest: TimelineManifestV2.optional(),
