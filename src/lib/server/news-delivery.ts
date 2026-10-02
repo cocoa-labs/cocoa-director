@@ -1117,9 +1117,11 @@ function hybridPlanFor(job: VideoJob, storyboard: NewsStoryboard): HybridVisualP
   };
 }
 
-function assertNarrationFits(job: VideoJob, assets: SceneAsset[]) {
-  const budget = narrationBudgetSummary(assets.map((asset) => asset.narration.words.map((word) => word.text).join(" ")).join(" "), job.durationSeconds);
-  if (!budget.withinBudget) throw new Error(`Narration duration budget failed: ${budget.words} words exceed the ${budget.budgetWords}-word target. Revise and reapprove the script.`);
+export function assertNarrationFits(job: VideoJob, assets: SceneAsset[]) {
+  const timing = editorialNarrationTiming(job);
+  const budget = narrationBudgetSummary(assets.map((asset) => asset.narration.words.map((word) => word.text).join(" ")).join(" "), job.durationSeconds, timing.pacing);
+  if (timing.measured && timing.requiresRevision) throw new Error(timing.revisionMessage);
+  if (!timing.measured && !budget.withinBudget) throw new Error(`Narration duration budget failed: ${budget.words} words exceed the ${budget.budgetWords}-word target. Revise and reapprove the script.`);
   assets.forEach((asset, index) => {
     if (asset.narration.durationMs > asset.targetDurationMs * MAX_NARRATION_OVERRUN) {
       throw new Error(`Narration duration for scene ${index + 1} is ${(asset.narration.durationMs / 1_000).toFixed(1)}s for a ${(asset.targetDurationMs / 1_000).toFixed(1)}s slot. Revise and reapprove the script; Cocoa will not truncate narration.`);

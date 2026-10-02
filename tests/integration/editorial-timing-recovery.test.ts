@@ -4,7 +4,7 @@ import { editorialNarrationTiming, editorialReviewStatus } from "@/lib/editorial
 import { narrationBudgetSummary, buildHybridVisualPlan } from "@/lib/hybrid-visuals";
 import { initialWorkflowSteps } from "@/lib/production";
 import { EditorialTimingPlan, ProductionCreateRequest, SourceBundle, VideoCreateRequest, type VideoJob } from "@/lib/schemas";
-import { reconcileEditorialTiming } from "@/lib/server/news-delivery";
+import { assertNarrationFits, reconcileEditorialTiming } from "@/lib/server/news-delivery";
 import { approveNewsGate, updateNewsDraft } from "@/lib/server/news-editorial";
 import { fitProductionEditorialDraft } from "@/lib/server/productions";
 import { getStore, resetInMemoryStoreForDev } from "@/lib/server/store";
@@ -65,6 +65,22 @@ describe("measured editorial timing recovery", () => {
     const measured = (await getStore().getJob(draft.id))!;
     expect(editorialNarrationTiming(measured).requiresRevision).toBe(false);
     await expect(approveNewsGate({ job: measured, user, gate: "script", artifactVersionId: scriptVersion })).resolves.toBeDefined();
+  });
+
+  it("keeps measured timing authoritative at delivery for a faster recorded voice", async () => {
+    const draft = await fixture();
+    const storyboard = { ...draft.storyboard!, scenes: draft.storyboard!.scenes.map((scene) => ({ ...scene, narration: `${scene.narration} ${scene.narration}` })) };
+    const updated = await getStore().updateJob(draft.id, { storyboard, script: storyboard.scenes.map((scene) => scene.narration).join("\n\n") });
+    await addMeasurements(updated, Array(6).fill(9_000));
+    expect((await reconcileEditorialTiming(updated.id)).timingPlan?.coverage.passed).toBe(true);
+    const measured = (await getStore().getJob(updated.id))!;
+    const assets = measured.storyboard!.scenes.map((scene) => ({
+      targetDurationMs: scene.endMs - scene.startMs,
+      narration: { audio: Buffer.alloc(0), durationMs: 9_000, contentType: "audio/mpeg", costCents: 0, words: scene.narration.split(/\s+/).map((text, index) => ({ text, startMs: index * 200, endMs: index * 200 + 200 })) },
+    }));
+    expect(narrationBudgetSummary(measured.script!, 60).withinBudget).toBe(false);
+    expect(() => assertNarrationFits(measured, assets)).not.toThrow();
+    expect(() => assertNarrationFits(measured, [{ ...assets[0], targetDurationMs: 2_000 }])).toThrow("will not truncate narration");
   });
 
   it("supports already-saved timing reports and preserves calibration after manual edits", async () => {
