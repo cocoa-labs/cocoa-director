@@ -12,7 +12,7 @@ import type {
 } from "@/lib/schemas";
 import { PROVIDER_PRICING } from "@/lib/provider-pricing";
 import { buildMotionCues } from "@/lib/editorial-timing";
-import { usesNaturalDuration } from "@/lib/editorial-duration";
+import { editorialMessageExposureMs, usesNaturalDuration } from "@/lib/editorial-duration";
 
 // Technical narration includes acronyms, numbers and sentence pauses. Use a
 // conservative first pass; a saved recording supplies the calibrated pace.
@@ -250,7 +250,8 @@ function buildSceneBeats(input: {
     ? !allowStandardCinema ? 1 : input.scenePosition === standardCinematicSceneCount - 1 ? 2 : 1
     : !allowStandardCinema ? 2 : durationMs <= 9_000 ? 2 : durationMs <= 12_000 ? 3 : durationMs <= 18_000 ? 4 : 5;
   const premiumCount = durationMs <= 9_000 ? 2 : durationMs <= 14_000 ? 3 : durationMs <= 18_000 ? 4 : 5;
-  const count = input.naturalDuration ? Math.min(24, Math.max(1, Math.ceil(durationMs / 5_000))) : input.qualityTier === "draft" ? Math.min(2, Math.max(1, Math.ceil(durationMs / 5_000))) : input.qualityTier === "premium" ? premiumCount : standardCount;
+  const naturalCount = Math.max(1, Math.ceil(durationMs / 6_000), Math.min(Math.ceil(durationMs / 5_000), Math.floor(durationMs / editorialMessageExposureMs(input.scene.title))));
+  const count = input.naturalDuration ? Math.min(400, naturalCount) : input.qualityTier === "draft" ? Math.min(2, Math.max(1, Math.ceil(durationMs / 5_000))) : input.qualityTier === "premium" ? premiumCount : standardCount;
   const weights = input.naturalDuration ? undefined : input.qualityTier === "premium"
     ? count === 2 ? [0.267, 0.733]
       : count === 3 ? [0.2, 0.4, 0.4]

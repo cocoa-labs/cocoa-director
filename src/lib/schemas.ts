@@ -202,10 +202,10 @@ export const EditorialPause = z.object({
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().positive(),
   durationMs: z.number().int().positive().max(30_000),
-  kind: z.enum(["transition", "chapter", "ending"]),
+  kind: z.enum(["transition", "chapter", "ending", "reading"]),
   reason: z.string().trim().min(1).max(300),
   approved: z.boolean().default(false),
-}).refine((pause) => pause.endMs > pause.startMs && pause.endMs - pause.startMs === pause.durationMs && (pause.kind === "ending" || pause.durationMs <= 1_500), "Editorial pause timestamps must match durationMs and the pause policy");
+}).refine((pause) => pause.endMs > pause.startMs && pause.endMs - pause.startMs === pause.durationMs && (["ending", "reading"].includes(pause.kind) || pause.durationMs <= 1_500), "Editorial pause timestamps must match durationMs and the pause policy");
 export type EditorialPause = z.infer<typeof EditorialPause>;
 
 export const NarrationCoverageReport = z.object({

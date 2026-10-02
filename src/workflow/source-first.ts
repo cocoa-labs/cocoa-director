@@ -10,7 +10,7 @@ import { isExplicitBreakingClaim } from "@/lib/news-claims";
 import { narrationWordBudget } from "@/lib/hybrid-visuals";
 import { validateTimeline } from "@/lib/production";
 import { isSourceMetadata, selectExplainerUnits, sourceSentences } from "@/lib/source-content";
-import { estimateNaturalSeconds, sourceCoverageOutline, usesNaturalDuration } from "@/lib/editorial-duration";
+import { estimateNaturalSeconds, estimateNaturalSceneDurations, sourceCoverageOutline, usesNaturalDuration } from "@/lib/editorial-duration";
 
 export type SourceFirstDraft = {
   sourceBundle: SourceBundle;
@@ -79,7 +79,7 @@ export function buildSourceFirstDraft(
   });
   const script = outline.map((scene) => scene.narration).join("\n\n");
   const durationMs = (natural ? estimateNaturalSeconds(outline, wordsPerSecond) : input.targetDurationSeconds) * 1_000;
-  const timeline = buildGraphicsTimeline(productionId, input, outline, durationMs, now);
+  const timeline = buildGraphicsTimeline(productionId, input, outline, durationMs, now, wordsPerSecond);
   const sourceBundle = withDerivedClaims(input.sourceBundle, input.contentType, outline, now);
   const qaReport = validateTimeline({ timeline, sourceBundle, checkedAt: now });
   const editorialPlan: EditorialPlan = {
@@ -115,13 +115,13 @@ function buildGraphicsTimeline(
   outline: SourceFirstDraft["outline"],
   durationMs: number,
   compiledAt: string,
+  wordsPerSecond?: number,
 ): TimelineManifestV2 {
-  const weights = outline.map((scene) => Math.max(1, scene.narration.split(/\s+/).length));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const naturalDurations = usesNaturalDuration(input) ? estimateNaturalSceneDurations(outline, wordsPerSecond) : undefined;
   const baseDuration = Math.floor(durationMs / outline.length);
   let cursor = 0;
   const graphics = outline.map((scene, index) => {
-    const endMs = index === outline.length - 1 ? durationMs : cursor + (usesNaturalDuration(input) ? Math.floor(durationMs * weights[index] / totalWeight) : baseDuration);
+    const endMs = index === outline.length - 1 ? durationMs : cursor + (naturalDurations?.[index] ?? baseDuration);
     const segment = {
       id: scene.id,
       trackId: "graphics-main",

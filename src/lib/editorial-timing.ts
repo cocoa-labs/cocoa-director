@@ -6,7 +6,7 @@ import type {
   VisualBeat,
 } from "@/lib/schemas";
 import { MAX_EDITORIAL_NARRATION_RATE, MIN_EDITORIAL_NARRATION_RATE } from "@/lib/editorial-pacing";
-import { EDITORIAL_ENDING_MS, EDITORIAL_TRANSITION_MS } from "@/lib/editorial-duration";
+import { EDITORIAL_TRANSITION_MS, editorialMessageExposureMs, naturalSceneDurationMs } from "@/lib/editorial-duration";
 
 const MIN_COVERAGE = 0.75;
 const MAX_COVERAGE = 0.92;
@@ -39,10 +39,12 @@ export function compileNaturalEditorialTiming(input: {
     if (!duration || !Number.isFinite(duration)) throw new Error(`Measured narration is missing for ${scene.id}.`);
     const last = index === input.storyboard.scenes.length - 1;
     const speechEndMs = cursor + Math.round(duration);
-    const endMs = last ? Math.ceil((speechEndMs + EDITORIAL_ENDING_MS) / 1_000) * 1_000 : speechEndMs + EDITORIAL_TRANSITION_MS;
+    const sceneEndMs = cursor + naturalSceneDurationMs(duration, scene.title, last);
+    const endMs = last ? Math.max(5_000, Math.ceil(sceneEndMs / 1_000) * 1_000) : sceneEndMs;
     const pauseAfterId = `pause-${scene.id}`;
     scenes.push({ sceneId: scene.id, startMs: cursor, speechStartMs: cursor, speechEndMs, endMs, measuredNarrationMs: Math.round(duration), retimeRate: 1, pauseAfterId });
-    pauses.push({ id: pauseAfterId, afterSceneId: scene.id, startMs: speechEndMs, endMs, durationMs: endMs - speechEndMs, kind: last ? "ending" : "transition", reason: last ? "Hold the closing takeaway after the complete narration" : "Natural transition breath", approved: true });
+    const readingHold = !last && endMs - speechEndMs > EDITORIAL_TRANSITION_MS;
+    pauses.push({ id: pauseAfterId, afterSceneId: scene.id, startMs: speechEndMs, endMs, durationMs: endMs - speechEndMs, kind: last ? "ending" : readingHold ? "reading" : "transition", reason: last ? "Hold the closing takeaway after the complete narration" : readingHold ? "Keep the complete on-screen message readable at three words per second" : "Natural transition breath", approved: true });
     cursor = endMs;
   }
   const spokenDurationMs = scenes.reduce((sum, scene) => sum + scene.measuredNarrationMs, 0);
@@ -229,7 +231,7 @@ export function normalizeEditorialVisualBeats(
       });
     }
     const minimumCount = Math.max(1, Math.ceil(durationMs / MAX_VISUAL_BEAT_MS));
-    const readingMs = natural ? Math.max(MIN_VISUAL_BEAT_MS, Math.ceil((scene.title?.split(/\s+/).filter(Boolean).length ?? 0) / 3 * 1000 + 360)) : MIN_VISUAL_BEAT_MS;
+    const readingMs = natural ? editorialMessageExposureMs(scene.title) : MIN_VISUAL_BEAT_MS;
     const maximumCount = Math.max(1, Math.floor(durationMs / readingMs));
     const targetCount = Math.min(candidates.length, Math.max(minimumCount, Math.min(maximumCount, candidates.length)));
     const selected = selectEditorialBeats(candidates, targetCount);

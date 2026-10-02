@@ -34,9 +34,24 @@ export function sourceCoverageOutline(bundle: SourceBundle, excludedClaimIds: st
   });
 }
 
-export function estimateNaturalSeconds(scenes: Array<{ narration: string }>, wordsPerSecond = DEFAULT_NARRATION_WORDS_PER_SECOND) {
-  const words = scenes.reduce((sum, scene) => sum + countEditorialWords(scene.narration), 0);
-  return Math.max(5, Math.ceil(words / Math.max(0.5, wordsPerSecond) + Math.max(0, scenes.length - 1) * EDITORIAL_TRANSITION_MS / 1_000 + EDITORIAL_ENDING_MS / 1_000));
+export function editorialMessageExposureMs(text = "") {
+  // Allow for both overlay fades as well as three readable words per second.
+  return Math.max(2_000, Math.ceil(countEditorialWords(text) / 3 * 1_000 + 360));
+}
+
+export function naturalSceneDurationMs(speechMs: number, title: string | undefined, last: boolean) {
+  return Math.max(Math.round(speechMs) + (last ? EDITORIAL_ENDING_MS : EDITORIAL_TRANSITION_MS), editorialMessageExposureMs(title));
+}
+
+export function estimateNaturalSceneDurations(scenes: Array<{ narration: string; title?: string }>, wordsPerSecond = DEFAULT_NARRATION_WORDS_PER_SECOND) {
+  const durations = scenes.map((scene, index) => naturalSceneDurationMs(countEditorialWords(scene.narration) / Math.max(0.5, wordsPerSecond) * 1_000, scene.title, index === scenes.length - 1));
+  const total = durations.reduce((sum, duration) => sum + duration, 0);
+  if (durations.length) durations[durations.length - 1] += Math.max(5_000, Math.ceil(total / 1_000) * 1_000) - total;
+  return durations;
+}
+
+export function estimateNaturalSeconds(scenes: Array<{ narration: string; title?: string }>, wordsPerSecond = DEFAULT_NARRATION_WORDS_PER_SECOND) {
+  return Math.max(5, estimateNaturalSceneDurations(scenes, wordsPerSecond).reduce((sum, duration) => sum + duration, 0) / 1_000);
 }
 
 export function countEditorialWords(text: string) {

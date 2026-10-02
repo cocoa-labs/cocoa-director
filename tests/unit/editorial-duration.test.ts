@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { makeDurationPlan, outsideDurationTolerance, resolveDurationPlan, sourceCoverageOutline, usesNaturalDuration } from "@/lib/editorial-duration";
-import { compileNaturalEditorialTiming } from "@/lib/editorial-timing";
-import { EditorialTimingPlan, ProductionCreateRequest, SourceBundle } from "@/lib/schemas";
+import { applyTimingPlan, compileNaturalEditorialTiming } from "@/lib/editorial-timing";
+import { EditorialPause, EditorialTimingPlan, ProductionCreateRequest, SourceBundle } from "@/lib/schemas";
+import { buildHybridVisualPlan } from "@/lib/hybrid-visuals";
 import { buildSourceFirstDraft } from "@/workflow/source-first";
 import { readableEditorialMessage, fitCompleteEditorialText } from "@/lib/server/editorial-graphics";
 import { editorialScoreFilters } from "@/lib/editorial-score";
@@ -65,6 +66,33 @@ describe("content-led duration", () => {
     expect(resolveDurationPlan(plan, 73, 180, now).needsReview).toBe(true);
     expect(resolveDurationPlan(plan, 65, 201, now).needsReview).toBe(true);
     expect(resolveDurationPlan(plan, 601, 180, now).scopeTooLong).toBe(true);
+  });
+
+  it.each([700, 4500])("allows enough reading time around a %i-ms spoken scene", (speechMs) => {
+    const request = ProductionCreateRequest.parse({ contentType: "explainer", durationMode: "auto", qualityTier: "draft", brief: "Explain this source clearly.", sourceBundle: bundle(2) });
+    const initial = buildSourceFirstDraft(id, request, now);
+    const outline = [
+      { ...initial.outline[0], id: "short", title: "The evidence still has some important limits", narration: "Evidence varies.", claimIds: ["claim-0"] },
+      { ...initial.outline[0], id: "closing", title: "The complete conclusion", narration: text, claimIds: ["claim-1"] },
+    ];
+    const draft = buildSourceFirstDraft(id, request, now, outline, 10);
+    expect(draft.storyboard.scenes[0].endMs).toBeGreaterThanOrEqual(2694);
+    const plan = buildHybridVisualPlan({ productionId: id, request, storyboard: draft.storyboard, createdAt: now })!;
+    const timing = EditorialTimingPlan.parse(compileNaturalEditorialTiming({ productionId: id, storyboard: draft.storyboard, narration: [{ sceneId: "short", durationMs: speechMs }, { sceneId: "closing", durationMs: 6807 }], compiledAt: now }));
+    const timed = applyTimingPlan(draft.storyboard, plan, timing);
+    for (const visualPlan of [plan, timed.plan]) {
+      for (const beat of visualPlan.beats) {
+        const scene = draft.storyboard.scenes.find((candidate) => candidate.id === beat.sceneId)!;
+        expect(() => readableEditorialMessage(scene.title, undefined, beat.endMs - beat.startMs)).not.toThrow();
+      }
+    }
+    expect(timing.scenes[0].measuredNarrationMs).toBe(speechMs);
+    expect(timing.scenes[0].retimeRate).toBe(1);
+    expect(timing.targetDurationMs - timing.scenes.at(-1)!.speechEndMs).toBeGreaterThanOrEqual(3000);
+    if (speechMs === 700) {
+      expect(timing.pauses[0]).toMatchObject({ kind: "reading", approved: true });
+      expect(EditorialPause.safeParse({ ...timing.pauses[0], kind: "transition" }).success).toBe(false);
+    }
   });
 
   it("keeps absent policy fixed and music behavior unchanged", () => {
