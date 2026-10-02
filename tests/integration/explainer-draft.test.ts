@@ -46,13 +46,12 @@ describe("source-grounded explainer drafts", () => {
     const project = await getStore().createProject({ userId: user.id, name: "Full paper regression" });
     const source = await addTextProductionSource({ projectId: project.id, title: "Research paper", text: `Abstract\n${evidence.join("\n\n")}`, user });
     const request = ProductionCreateRequest.parse({ contentType: "explainer", projectId: project.id, sourceRecordIds: [source.id], brief: "Teach the mechanism, results and limitations in plain language.", targetDurationSeconds: 60 });
-    const claims = evidence.map((excerpt) => ({ sourceId: source.id, text: excerpt, evidenceExcerpt: excerpt }));
     const scenes = evidence.map((narration, index) => ({ title: title[index], narration, visual: `Show a clear visual explanation of ${title[index]}.`, claimIds: [] as string[] }));
     vi.stubEnv("PROVIDER_MODE", "live");
     vi.stubEnv("OPENAI_API_KEY", "mocked-provider-no-network");
     responsesCreate.mockImplementation(async (payload: { input: Array<{ content: string }> }) => {
       const input = JSON.parse(payload.input[1].content);
-      if (input.sources) return { output_text: JSON.stringify({ sources: [{ sourceId: source.id, pageType: "reference" }], claims }) };
+      if (input.sources) return { output_text: JSON.stringify({ claims: input.sources[0].passages.map((passage: { id: string; text: string }) => ({ text: passage.text, evidenceId: passage.id })) }) };
       const narration = scenes.map((scene, index) => ({ ...scene, narration: scene.narration.split(" ").slice(0, 19).join(" ") + ".", claimIds: [input.claims[index].id] }));
       return { output_text: JSON.stringify({ title: "An actual explanation", scenes: narration }) };
     });
@@ -80,7 +79,7 @@ describe("source-grounded explainer drafts", () => {
     vi.stubEnv("OPENAI_API_KEY", "mocked-provider-no-network");
     responsesCreate.mockRejectedValue(new Error("Provider temporarily unavailable"));
     const request = ProductionCreateRequest.parse({ contentType: "explainer", brief: "Explain this research clearly.", sourceBundle: { inputs: [{ id: "paper", kind: "text", text: evidence.join(" ") }] } });
-    await expect(createProduction(request, user)).rejects.toThrow("Provider temporarily unavailable");
+    await expect(createProduction(request, user)).rejects.toMatchObject({ status: 502, code: "source_analysis_failed" });
   });
 
   it("does not allow an explainer to approve an unknown cited claim", async () => {

@@ -32,3 +32,11 @@ Provider responses in automated drafting tests are mocked. No paid narration, im
 Before speech is recorded, the approval screen labels its word-count timing as an estimate. Once narration is available, the screen uses the measured audio for that saved script. An overrun pauses the production and offers **Condense to duration**; an underfilled recording offers **Fit to duration**. The recovery writer uses the recorded voice pace and reserves room for scene transitions.
 
 Refresh an already-paused production to reveal the recovery action; its sources do not need to be imported again. Review the revised script and storyboard before approving generation. Revised scripts receive new version IDs, so recordings from older versions cannot be reused accidentally. Music-video behavior is unchanged.
+
+## URL draft evidence recovery
+
+Live source analysis selects bounded passage IDs through a strict structured response. The server resolves those IDs to the original source and exact quotation, including its punctuation and evidence hash. It no longer depends on the model copying source UUIDs and quotations perfectly. Later document sections remain represented, and invented passage IDs are rejected.
+
+Source-analysis failures report whether the source is empty, lacks supported claims, or needs another analysis attempt. A deliberate retry gets a new request key only when analysis failed before any production was created; ambiguous errors retain duplicate protection. Logs contain counts and error types without article bodies or provider credentials. Provider guards remain authoritative even when the SDK wraps their errors.
+
+Regression coverage exercises URL extraction, the real OpenAI SDK and structured format, HTTP draft creation, citations, invalid evidence, spending guards and idempotent retries with substituted network responses. The browser regression covers failure-to-retry recovery with saved sources. These tests do not establish a live provider result.

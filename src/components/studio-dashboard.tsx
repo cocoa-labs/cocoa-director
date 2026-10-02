@@ -878,8 +878,13 @@ export function StudioDashboard({
               idempotencyKey,
             }),
       });
-      const json = await readApiJson<{ videoId?: string; productionId?: string; error?: string }>(response);
-      if (!response.ok) throw new Error(json.error ?? "Create failed");
+      const json = await readApiJson<{ videoId?: string; productionId?: string; error?: string; code?: string }>(response);
+      if (!response.ok) {
+        // These failures occur before a production exists. A deliberate retry
+        // needs a fresh key; ambiguous failures keep their key to avoid duplicates.
+        if (!isMusicVideo && ["source_analysis_failed", "source_analysis_unavailable", "source_claims_missing", "source_content_empty"].includes(json.code ?? "")) pendingCreateKeyRef.current = null;
+        throw new Error(json.error ?? "Create failed");
+      }
       const createdId = json.productionId ?? json.videoId;
       if (!createdId) throw new Error("Create response did not include a production ID");
       pendingCreateKeyRef.current = null;
