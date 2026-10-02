@@ -142,7 +142,9 @@ test("editorial text and PDF sources, versioned approvals, captions and citation
   await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
   expect((await approved).ok()).toBe(true);
   const id = new URL(page.url()).searchParams.get("production")!;
-  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`)).json()).state, { timeout: 300_000 }).toBe("complete");
+  // Retry a reset keep-alive connection during local workflow compilation;
+  // HTTP errors and production failures still fail this assertion.
+  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`, { maxRetries: 2 })).json()).state, { timeout: 300_000 }).toBe("complete");
   const output = await (await page.request.get(`/api/productions/${id}`)).json();
   expect(output.job.approvals.length).toBeGreaterThanOrEqual(2);
   for (const key of ["srt", "vtt", "sourceManifestJson", "claimLedger"]) {
@@ -161,7 +163,7 @@ test("explainer teaches the supplied body and preserves citations through export
   await page.getByLabel("Production brief", { exact: true }).fill("Explain how the supplied rain garden design works, including its limits and practical conclusion.");
   await page.getByRole("button", { name: "Continue to sources", exact: true }).click();
   await page.getByPlaceholder("Text source title (optional)").fill("Rain garden study");
-  await page.locator("#source-text").fill(`Authors: Example Research Group\nSubmitted on 1 October 2026\nView a PDF of the paper titled Rain garden study\nAbstract:\nA rain garden is a shallow planted basin that receives runoff from a roof, driveway, or paved path during rain.\nWater entering the basin spreads across the planted surface, giving the temporary pool time to soak slowly into the soil.\nPlant roots help maintain spaces in the soil, while stems and leaves slow moving water as it enters the basin.\nThe design uses plants suited to the local soil and climate, and young plants need regular care as they establish.\nThe basin needs a safe overflow route because storms larger than its designed capacity can send excess water beyond it.\nConclusion\nThe practical takeaway is to combine suitable planting with a safe overflow route, so the garden works within its designed limits.`);
+  await page.locator("#source-text").fill(`Authors: Example Research Group\nSubmitted on 1 October 2026\nView a PDF of the paper titled Rain garden study\nAbstract:\nA rain garden is a planted basin that receives runoff from roofs, driveways, or paved paths during rain.\nWater entering the basin spreads across the surface, giving the temporary pool time to soak into the soil.\nPlant roots maintain spaces in the soil, while stems and leaves slow water as it enters the basin.\nThe design uses plants suited to local conditions, and young plants need regular care as they establish themselves.\nThe basin needs a safe overflow route because storms larger than its capacity can send excess water beyond.\nConclusion\nThe practical takeaway: combine suitable planting with safe overflow, so the garden works within the designed stormwater capacity.`);
   await page.getByRole("button", { name: "Add text source", exact: true }).click();
   await page.getByRole("button", { name: "Continue to direction", exact: true }).click();
   await page.getByLabel("Quality tier", { exact: true }).selectOption("draft");
@@ -178,7 +180,7 @@ test("explainer teaches the supplied body and preserves citations through export
   const approved = page.waitForResponse((response) => response.url().endsWith("/approvals") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Approve storyboard & generate", exact: true }).click();
   expect((await approved).ok()).toBe(true);
-  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`)).json()).state, { timeout: 300_000 }).toBe("complete");
+  await expect.poll(async () => (await (await page.request.get(`/api/productions/${id}`, { maxRetries: 2 })).json()).state, { timeout: 300_000 }).toBe("complete");
   const output = await (await page.request.get(`/api/productions/${id}`)).json();
   expect(output.job.contentType).toBe("explainer");
   expect(output.job.sourceBundle.claims.every((claim: { evidenceRefs: unknown[] }) => claim.evidenceRefs.length > 0)).toBe(true);

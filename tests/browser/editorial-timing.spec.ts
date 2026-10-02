@@ -43,4 +43,25 @@ test("a measured narration overrun offers recovery instead of approval or a work
   await expect(page.getByText(/103% measured spoken coverage/)).toBeVisible();
   await expect(page.getByText(/Recorded narration is 62.0 seconds/).first()).toBeVisible();
   await page.screenshot({ path: info.outputPath("measured-timing-recovery.png"), fullPage: true });
+  let releaseFit!: () => void;
+  const fitPending = new Promise<void>((resolve) => { releaseFit = resolve; });
+  await page.route(`**/api/productions/${id}/fit-editorial`, async (route) => {
+    expect(route.request().headers()["idempotency-key"]).toBeTruthy();
+    await fitPending;
+    job.visualPlan.timingPlan = undefined;
+    job.visualPlan.narrationWordsPerSecond = 120 / 62.035;
+    job.storyboard.scenes.forEach((scene: { narration: string }) => { scene.narration = scene.narration.split(" ").slice(0, 17).join(" "); });
+    job.script = job.storyboard.scenes.map((scene: { narration: string }) => scene.narration).join("\n\n");
+    job.error = null;
+    snapshot.error = null;
+    await route.fulfill({ json: { fitted: true, productionId: id } });
+  });
+  await page.getByRole("button", { name: "Condense to 1:00", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Fitting script...", exact: true })).toBeDisabled();
+  await expect(page.getByRole("status").filter({ hasText: "Fitting the script to duration" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Starting|Staging/ })).toHaveCount(0);
+  releaseFit();
+  await expect(page.getByRole("button", { name: "Approve script", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Fitting script...", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Waiting for your approval", { exact: true }).first()).toBeVisible();
 });

@@ -24,6 +24,7 @@ export class SpendGuardError extends Error {
 }
 
 type ProviderSpendDecision = {
+  allowanceMode?: "remaining";
   actualCostCents?: number;
   estimatedCostCents: number;
   idempotencyKey?: string;
@@ -42,7 +43,7 @@ type ProviderSpendDecision = {
 export async function assertProviderSpendAllowed(input: ProviderSpendDecision) {
   try {
     const decision = await reserveBudget({ user: input.user, scope: `${input.source}:${input.model}`, key: input.idempotencyKey,
-      estimatedCostCents: input.estimatedCostCents, metadata: { ...input.metadata, source: input.source }, videoJobId: input.videoJobId });
+      estimatedCostCents: input.estimatedCostCents, allowanceMode: input.allowanceMode, metadata: { ...input.metadata, source: input.source }, videoJobId: input.videoJobId });
     if (!decision.replayed) await getStore().createProviderAuditEvent({
       userId: input.user.id, projectId: input.projectId, videoJobId: input.videoJobId,
       mediaGenerationId: input.mediaGenerationId, mediaSessionId: input.mediaSessionId,

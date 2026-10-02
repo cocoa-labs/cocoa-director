@@ -1,5 +1,5 @@
 import { spokenScriptText } from "@/lib/editorial-timing";
-import { narrationBudgetSummary, type NarrationPacing } from "@/lib/hybrid-visuals";
+import { DEFAULT_NARRATION_WORDS_PER_SECOND, narrationBudgetSummary, type NarrationPacing } from "@/lib/hybrid-visuals";
 import type { VideoJob } from "@/lib/schemas";
 
 /** One timing decision for the approval UI, approval gate, and recovery writer. */
@@ -23,7 +23,7 @@ export function editorialNarrationTiming(job: VideoJob) {
   const pacing: NarrationPacing | undefined = wordsPerSecond
     ? { wordsPerSecond, sceneCount: job.storyboard?.scenes.length }
     : undefined;
-  const budget = narrationBudgetSummary(narration, job.durationSeconds, pacing);
+  const budget = narrationBudgetSummary(narration, job.durationSeconds, pacing ?? { wordsPerSecond: DEFAULT_NARRATION_WORDS_PER_SECOND, sceneCount: job.storyboard?.scenes.length });
   const revisionMessage = timing && !timing.coverage.passed
     ? `Recorded narration is ${(timing.coverage.spokenDurationMs / 1_000).toFixed(1)} seconds. This ${job.durationSeconds}-second video needs ${(budget.minimumCoverage * job.durationSeconds).toFixed(1)}–${(job.durationSeconds * 0.92).toFixed(1)} seconds of speech to leave room for transitions. Fit the script to duration, then review and approve the new version.`
     : undefined;
@@ -43,6 +43,14 @@ export function editorialReviewStatus(job: VideoJob) {
   if (editorialNarrationTiming(job).requiresRevision) return {
     title: "Script revision needed",
     detail: "Generation is paused. Fit the script to the selected duration, then review and approve the revised script and storyboard.",
+  };
+  const awaitingApproval = ["script", "storyboard"].some((gate) => {
+    const version = job.workflowSteps?.find((step) => step.id === gate)?.artifactVersionId;
+    return !version || !job.approvals?.some((approval) => approval.gate === gate && approval.artifactVersionId === version);
+  });
+  if (!awaitingApproval) return {
+    title: "Production needs attention",
+    detail: job.error ?? "Review the production status and recover the unfinished work. Your approved script and completed assets are saved.",
   };
   return {
     title: "Waiting for your approval",

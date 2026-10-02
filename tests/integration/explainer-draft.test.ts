@@ -52,7 +52,7 @@ describe("source-grounded explainer drafts", () => {
     responsesCreate.mockImplementation(async (payload: { input: Array<{ content: string }> }) => {
       const input = JSON.parse(payload.input[1].content);
       if (input.sources) return { output_text: JSON.stringify({ claims: input.sources[0].passages.map((passage: { id: string; text: string }) => ({ text: passage.text, evidenceId: passage.id })) }) };
-      const narration = scenes.map((scene, index) => ({ ...scene, narration: scene.narration.split(" ").slice(0, 19).join(" ") + ".", claimIds: [input.claims[index].id] }));
+      const narration = scenes.map((scene, index) => ({ ...scene, narration: scene.narration.split(" ").slice(0, 18).join(" ") + ".", claimIds: [input.claims[index].id] }));
       return { output_text: JSON.stringify({ title: "An actual explanation", scenes: narration }) };
     });
     const job = await createProduction(request, user);

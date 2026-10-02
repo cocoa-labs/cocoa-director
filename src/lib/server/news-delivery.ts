@@ -22,7 +22,7 @@ import type {
   WorkflowStep,
 } from "@/lib/schemas";
 import { timelineToSrt, timelineToVtt } from "@/lib/captions";
-import { narrationBudgetSummary } from "@/lib/hybrid-visuals";
+import { narrationBudgetSummary, DEFAULT_NARRATION_WORDS_PER_SECOND } from "@/lib/hybrid-visuals";
 import { applyTimingPlan, compileEditorialTimingPlan } from "@/lib/editorial-timing";
 import { editorialNarrationTiming } from "@/lib/editorial-narration";
 import { validateTimeline } from "@/lib/production";
@@ -461,7 +461,7 @@ function estimatedTtsCostCents(text: string) {
 
 function estimateNarrationDuration(text: string) {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
-  return Math.max(1_500, Math.round(words / 2.35 * 1_000));
+  return Math.max(1_500, Math.round(words / DEFAULT_NARRATION_WORDS_PER_SECOND * 1_000));
 }
 
 function wordsFromCharacterAlignment(alignment: { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] }) {

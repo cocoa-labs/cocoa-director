@@ -3,7 +3,8 @@ import { NextResponse } from "next/server";
 
 import { apiErrorResponse } from "@/lib/server/api-error";
 import { fitProductionEditorialDraft } from "@/lib/server/productions";
-import { authorizeVideoRequest } from "@/lib/server/videos";
+import { withJobContext } from "@/lib/server/provider-execution";
+import { authorizeVideoRequest, idempotencyKeyFromRequest } from "@/lib/server/videos";
 
 export const runtime = "nodejs";
 
@@ -12,7 +13,8 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
     const { id } = await context.params;
     const auth = await authorizeVideoRequest(request, id);
     if (auth.response) return auth.response;
-    const job = await fitProductionEditorialDraft(auth.job, auth.user);
+    if (!idempotencyKeyFromRequest(request)) return NextResponse.json({ error: "Missing Idempotency-Key header" }, { status: 400 });
+    const job = await withJobContext(id, () => fitProductionEditorialDraft(auth.job, auth.user));
     return NextResponse.json({
       productionId: job.id,
       job,

@@ -2,7 +2,9 @@ import { actionRequest } from "@/lib/server/action-request";
 import { NextResponse } from "next/server";
 
 import { ProductionRecoveryRequest } from "@/lib/schemas";
+import { editorialRecoveryAllowanceCents } from "@/lib/editorial-costs";
 import { apiErrorResponse } from "@/lib/server/api-error";
+import { productionBudgetSnapshot } from "@/lib/server/budget-ledger";
 import { getProductionProgress } from "@/lib/server/production-progress";
 import {
   authorizeManualVisualQualityRecovery,
@@ -117,9 +119,12 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
           remainingReserveCents: remainingReserve,
         }, { status: 409 });
       }
+      const confirmation = await recoveryAllowanceConfirmation(id, editorialRecoveryAllowanceCents(estimatedCostCents), body.confirmSpend);
+      if (confirmation) return confirmation;
       const guard = await assertVideoActionAllowed({
         action: "resume_editorial_production",
-        estimatedCostCents,
+        estimatedCostCents: body.confirmSpend ? editorialRecoveryAllowanceCents(estimatedCostCents) : 0,
+        allowanceMode: body.confirmSpend ? "remaining" : undefined,
         idempotencyKey,
         job: auth.job,
         metadata: { requestedBeatIds, recoveryAction: body.action, recoveryGate: "visual_rough_cut_qa" },
@@ -151,9 +156,12 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
     const media = await getStore().listJobMedia(id);
     const failures = latestFailedVisuals(media.generations);
     if (body.action === "resume" && failures.length === 0) {
+      const confirmation = await recoveryAllowanceConfirmation(id, 50, body.confirmSpend);
+      if (confirmation) return confirmation;
       const guard = await assertVideoActionAllowed({
         action: "resume_editorial_production",
-        estimatedCostCents: 50,
+        estimatedCostCents: body.confirmSpend ? 50 : 0,
+        allowanceMode: body.confirmSpend ? "remaining" : undefined,
         idempotencyKey,
         job: auth.job,
         metadata: { resumeFrom: "timeline", existingSuccessfulAssets: media.assets.length },
@@ -188,9 +196,12 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
         remainingReserveCents: remainingReserve,
       }, { status: 409 });
     }
+    const confirmation = await recoveryAllowanceConfirmation(id, editorialRecoveryAllowanceCents(estimatedCostCents), body.confirmSpend);
+    if (confirmation) return confirmation;
     const guard = await assertVideoActionAllowed({
       action: "resume_editorial_production",
-      estimatedCostCents,
+      estimatedCostCents: body.confirmSpend ? editorialRecoveryAllowanceCents(estimatedCostCents) : 0,
+      allowanceMode: body.confirmSpend ? "remaining" : undefined,
       idempotencyKey,
       job: reconciled,
       metadata: { requestedBeatIds, recoveryAction: body.action, existingSuccessfulAssets: media.assets.length },
@@ -235,6 +246,19 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
     if (error instanceof SpendGuardError) return spendGuardResponse(error);
     return apiErrorResponse(error, error instanceof Error ? error.message : "Production recovery failed.");
   }
+}
+
+/** An unconfirmed resume can consume existing allowance, but cannot enlarge it. */
+async function recoveryAllowanceConfirmation(id: string, requiredCents: number, confirmed: boolean) {
+  if (confirmed) return undefined;
+  const remainingCents = (await productionBudgetSnapshot(id))?.remainingCents ?? 0;
+  if (remainingCents >= requiredCents) return undefined;
+  return NextResponse.json({
+    error: `Authorize up to $${(requiredCents / 100).toFixed(2)} for the remaining work before resuming.`,
+    code: "recovery_spend_confirmation_required",
+    estimatedCostCents: requiredCents,
+    remainingAuthorizedCents: remainingCents,
+  }, { status: 409 });
 }
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {

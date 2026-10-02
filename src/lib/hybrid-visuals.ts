@@ -13,7 +13,9 @@ import type {
 import { PROVIDER_PRICING } from "@/lib/provider-pricing";
 import { buildMotionCues } from "@/lib/editorial-timing";
 
-const WORDS_PER_SECOND = 2.35;
+// Technical narration includes acronyms, numbers and sentence pauses. Use a
+// conservative first pass; a saved recording supplies the calibrated pace.
+export const DEFAULT_NARRATION_WORDS_PER_SECOND = 2;
 const NARRATION_RESERVE = 0.08;
 
 const PRESETS = {
@@ -48,16 +50,16 @@ const PRESETS = {
 
 export type NarrationPacing = { wordsPerSecond: number; sceneCount?: number };
 
-export function narrationWordBudget(targetDurationSeconds: number, wordsPerSecond = WORDS_PER_SECOND) {
+export function narrationWordBudget(targetDurationSeconds: number, wordsPerSecond = DEFAULT_NARRATION_WORDS_PER_SECOND) {
   return Math.max(20, Math.floor(targetDurationSeconds * wordsPerSecond * (1 - NARRATION_RESERVE)));
 }
 
-export function predictedNarrationDurationMs(text: string, wordsPerSecond = WORDS_PER_SECOND) {
+export function predictedNarrationDurationMs(text: string, wordsPerSecond = DEFAULT_NARRATION_WORDS_PER_SECOND) {
   return Math.max(1_000, Math.round(wordCount(text) / wordsPerSecond * 1_000));
 }
 
 export function narrationBudgetSummary(text: string, targetDurationSeconds: number, pacing?: NarrationPacing) {
-  const wordsPerSecond = pacing?.wordsPerSecond ?? WORDS_PER_SECOND;
+  const wordsPerSecond = pacing?.wordsPerSecond ?? DEFAULT_NARRATION_WORDS_PER_SECOND;
   const words = wordCount(text.replace(/\[claim:[^\]]+\]/g, ""));
   const budgetWords = narrationWordBudget(targetDurationSeconds, wordsPerSecond);
   const minimumSeconds = Math.max(targetDurationSeconds * 0.75, pacing?.sceneCount ? targetDurationSeconds - pacing.sceneCount * 1.5 : 0);

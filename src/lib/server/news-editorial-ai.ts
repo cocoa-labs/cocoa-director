@@ -7,7 +7,7 @@ import type { ProductionCreateRequest, SourceBundle } from "@/lib/schemas";
 import type { SourceFirstOutlineScene } from "@/workflow/source-first";
 import { editorialModel } from "@/lib/model-routing";
 import { getProviderMode } from "@/lib/server/config";
-import { narrationBudgetSummary, type NarrationPacing } from "@/lib/hybrid-visuals";
+import { DEFAULT_NARRATION_WORDS_PER_SECOND, narrationBudgetSummary, type NarrationPacing } from "@/lib/hybrid-visuals";
 
 const EditorialOutput = z.object({
   title: z.string().trim().min(1).max(240),
@@ -27,8 +27,8 @@ export async function generateNewsEditorialOutline(input: {
   const claims = input.sourceBundle.claims.filter((claim) => claim.status === "supported" && claim.editorialStatus !== "excluded");
   if (claims.length === 0) return undefined;
   const initial = await requestEditorialOutline({ ...input, claims });
-  const budget = narrationBudgetSummary(outlineNarration(initial), input.request.targetDurationSeconds);
-  if (budget.predictedCoverage >= 0.75 && budget.withinBudget) return initial;
+  const budget = narrationBudgetSummary(outlineNarration(initial), input.request.targetDurationSeconds, { wordsPerSecond: DEFAULT_NARRATION_WORDS_PER_SECOND, sceneCount: initial.length });
+  if (budget.words >= budget.minimumWords && budget.withinBudget) return initial;
   return fitNewsEditorialOutline({ ...input, currentOutline: initial });
 }
 
@@ -46,7 +46,7 @@ export async function fitNewsEditorialOutline(input: {
   if (getProviderMode() === "live" && process.env.OPENAI_API_KEY) {
     candidate = await requestEditorialOutline({ ...input, claims, currentOutline: input.currentOutline });
   }
-  const pacing = input.pacing ? { ...input.pacing, sceneCount: candidate.length } : undefined;
+  const pacing = { wordsPerSecond: input.pacing?.wordsPerSecond ?? DEFAULT_NARRATION_WORDS_PER_SECOND, sceneCount: candidate.length };
   const fitted = fitOutlineToNarrationBudget(candidate, input.sourceBundle, input.request.targetDurationSeconds, pacing);
   const budget = narrationBudgetSummary(outlineNarration(fitted), input.request.targetDurationSeconds, pacing);
   if (budget.words < budget.minimumWords || !budget.withinBudget) {
@@ -66,10 +66,8 @@ async function requestEditorialOutline(input: {
   const defaultScenes = input.request.targetDurationSeconds >= 120
     ? Math.min(9, Math.max(6, Math.round(input.request.targetDurationSeconds / 24)))
     : Math.min(8, Math.max(3, Math.round(input.request.targetDurationSeconds / 10)));
-  const desiredScenes = input.pacing
-    ? Math.max(input.currentOutline?.length ?? defaultScenes, Math.ceil(input.request.targetDurationSeconds * 0.08 / 1.5))
-    : defaultScenes;
-  const budget = narrationBudgetSummary("", input.request.targetDurationSeconds, input.pacing ? { ...input.pacing, sceneCount: desiredScenes } : undefined);
+  const desiredScenes = Math.max(input.currentOutline?.length ?? defaultScenes, Math.ceil(input.request.targetDurationSeconds * 0.08 / 1.5));
+  const budget = narrationBudgetSummary("", input.request.targetDurationSeconds, { wordsPerSecond: input.pacing?.wordsPerSecond ?? DEFAULT_NARRATION_WORDS_PER_SECOND, sceneCount: desiredScenes });
   const totalNarrationWordBudget = budget.budgetWords;
   const minimumNarrationWords = budget.minimumWords;
   const targetNarrationWords = Math.round((minimumNarrationWords + totalNarrationWordBudget) / 2);
@@ -100,7 +98,7 @@ async function requestEditorialOutline(input: {
           targetNarrationWords,
           narrationPacing: input.pacing
             ? `The recorded voice spoke approximately ${Math.round(input.pacing.wordsPerSecond * 60)} words per minute. Use this measured pace and the supplied word limits, preserving room for transitions.`
-            : "Estimated 141 words per minute with an 8% reserve for pauses and transitions. Actual audio will be measured before rendering.",
+            : `Estimated ${Math.round(budget.wordsPerSecond * 60)} words per minute with an 8% reserve for pauses and transitions. Actual audio will be measured before rendering.`,
           desiredScenes,
           editorialShape: input.request.contentType === "explainer"
             ? "question → core idea → how it works → evidence and comparison → supported limitation → takeaway; use substantive claims from across the source, including its later sections"
@@ -158,7 +156,7 @@ export function fitOutlineToNarrationBudget(
   const used = new Set(splitEvidenceSentences(outlineNarration(next)).map(normalizeEvidence));
   const targetWords = pacing
     ? Math.round((initialBudget.minimumWords + initialBudget.budgetWords) / 2)
-    : Math.min(initialBudget.budgetWords, Math.ceil(targetDurationSeconds * 2.35 * 0.82));
+    : Math.min(initialBudget.budgetWords, Math.ceil(targetDurationSeconds * initialBudget.wordsPerSecond * 0.82));
   // Condensing may already have reached the valid range. Do not append the
   // removed evidence again and recreate the same overrun.
   if (narrationBudgetSummary(outlineNarration(next), targetDurationSeconds, pacing).words >= initialBudget.minimumWords) return next;

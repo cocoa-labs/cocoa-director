@@ -68,7 +68,7 @@ describe("URL draft HTTP contract", () => {
         })) });
       } else {
         output = JSON.stringify({ title: "How the method works", scenes: input.claims.map((claim: { id: string; text: string }, index: number) => ({
-          title: `Finding ${index + 1}`, narration: claim.text.split(" ").slice(0, 19).join(" ") + ".",
+          title: `Finding ${index + 1}`, narration: claim.text.split(" ").slice(0, 18).join(" ") + ".",
           visual: "Compare the supplied evidence in a clear diagram.", claimIds: [claim.id],
         })) });
       }

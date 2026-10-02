@@ -8,6 +8,7 @@ import {
   type WorkUnitProgress,
 } from "@/lib/schemas";
 import { getStore } from "@/lib/server/store";
+import { productionBudgetSnapshot } from "@/lib/server/budget-ledger";
 
 const ACTIVE_SECONDS = 90;
 const STALLED_SECONDS = 300;
@@ -30,17 +31,19 @@ export async function getProductionProgress(productionId: string) {
   const store = getStore();
   const job = await store.getJob(productionId);
   if (!job) throw new Error("Production not found.");
-  const [media, runs] = await Promise.all([
+  const [media, runs, budget] = await Promise.all([
     store.listJobMedia(productionId),
     store.listProductionWorkflowRuns(productionId),
+    productionBudgetSnapshot(productionId),
   ]);
-  return buildProductionProgress(job, media.generations, runs);
+  return buildProductionProgress(job, media.generations, runs, budget);
 }
 
 export function buildProductionProgress(
   job: VideoJob,
   generations: MediaGeneration[],
   runs: Awaited<ReturnType<ReturnType<typeof getStore>["listProductionWorkflowRuns"]>> = [],
+  budget?: Awaited<ReturnType<typeof productionBudgetSnapshot>>,
 ) {
   const latestGenerations = latestGenerationByUnit(generations);
   const units = [...latestGenerations.values()].map((generation) => workUnitFromGeneration(generation));
@@ -54,7 +57,7 @@ export function buildProductionProgress(
     ...job.providerCalls.map((call) => call.createdAt),
   ]);
   const ageSeconds = Math.max(0, (Date.now() - Date.parse(lastActivityAt)) / 1_000);
-  const policyFailures = units.filter((unit) => unit.state === "needs_attention");
+  const policyFailures = units.filter((unit) => unit.state === "needs_attention" || unit.state === "failed");
   const stages = EDITORIAL_STAGES.map((definition) => stageProgress(job, definition, units));
   const terminalState = terminalSnapshotState(job);
   const state = terminalState
@@ -82,7 +85,9 @@ export function buildProductionProgress(
     costs: {
       estimatedBaseCents: job.estimatedCostCents,
       recoveryReserveCents: job.recoveryBudgetCents,
-      maximumAuthorizedCents: job.estimatedCostCents + job.recoveryBudgetCents,
+      maximumAuthorizedCents: budget?.authorizedCents ?? job.estimatedCostCents + job.recoveryBudgetCents,
+      committedCents: budget?.committedCents,
+      remainingAuthorizedCents: budget?.remainingCents,
       actualCents: job.actualCostCents,
       recoverySpentCents: job.recoverySpentCents,
       remainingRecoveryCents,

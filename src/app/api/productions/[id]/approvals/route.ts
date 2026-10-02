@@ -2,7 +2,7 @@ import { actionRequest } from "@/lib/server/action-request";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { apiErrorResponse } from "@/lib/server/api-error";
+import { ApiRequestError, apiErrorResponse } from "@/lib/server/api-error";
 import { approveNewsGate } from "@/lib/server/news-editorial";
 import { SpendGuardError } from "@/lib/server/spend-guard";
 import { assertVideoActionAllowed, spendGuardResponse } from "@/lib/server/video-action-guard";
@@ -23,12 +23,20 @@ async function handlePOST(request: Request, context: { params: Promise<{ id: str
     const auth = await authorizeVideoRequest(request, id);
     if (auth.response) return auth.response;
     const body = ApprovalRequest.parse(await request.json());
-    if (body.gate === "storyboard") {
+    const alreadyApproved = auth.job.approvals?.some((approval) => approval.gate === body.gate && approval.artifactVersionId === body.artifactVersionId);
+    if (body.gate === "storyboard" && !alreadyApproved) {
+      if (!body.confirmSpend) throw new ApiRequestError("Spend confirmation is required before narration and asset generation.", 409, "spend_confirmation_required");
+      const currentVersion = auth.job.workflowSteps?.find((step) => step.id === "storyboard")?.artifactVersionId;
+      if (currentVersion !== body.artifactVersionId) throw new ApiRequestError("This storyboard approval is stale. Review the latest version before approving.", 409, "stale_approval");
+      const scriptVersion = auth.job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId;
+      if (!scriptVersion || !auth.job.approvals?.some((approval) => approval.gate === "script" && approval.artifactVersionId === scriptVersion)) throw new ApiRequestError("Approve the current cited script before approving the storyboard.", 409, "current_approval_required");
+      if (auth.job.cancellationRequested || auth.job.status === "cancelled") throw new ApiRequestError("Production cancelled.", 409, "production_cancelled");
       const idempotencyKey = idempotencyKeyFromRequest(request, body);
       if (!idempotencyKey) return NextResponse.json({ error: "Missing Idempotency-Key header" }, { status: 400 });
       const guard = await assertVideoActionAllowed({
         action: "approve_editorial_storyboard_and_generate",
-        estimatedCostCents: Math.max(0, auth.job.estimatedCostCents + auth.job.recoveryBudgetCents - auth.job.actualCostCents),
+        estimatedCostCents: auth.job.estimatedCostCents + auth.job.recoveryBudgetCents,
+        allowanceMode: "remaining",
         idempotencyKey,
         job: auth.job,
         metadata: {

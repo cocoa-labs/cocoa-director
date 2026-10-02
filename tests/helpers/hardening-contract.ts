@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as config from "@/lib/server/config";
 import { actionRequest, rememberActionResource } from "@/lib/server/action-request";
-import { reserveBudget, reserveProviderAttempt, budgetSnapshot } from "@/lib/server/budget-ledger";
+import { reserveBudget, reserveProviderAttempt, budgetSnapshot, productionBudgetSnapshot } from "@/lib/server/budget-ledger";
 import { getStore } from "@/lib/server/store";
 import { VideoCreateRequest, type ArtifactVersion } from "@/lib/schemas";
 import { GET as getProject } from "@/app/api/projects/[projectId]/route";
@@ -69,12 +69,28 @@ export function hardeningContract() {
       await getStore().updateJob(job.id, { contentType: "explainer", status });
       await reserveBudget({ user: owner, scope: "other-work", estimatedCostCents: 100 });
       const before = await getStore().getJob(job.id);
-      const response = await recoverProduction(request(owner.id, randomUUID(), { action: "resume", beatIds: [] }, `/api/productions/${job.id}/recovery`), { params: Promise.resolve({ id: job.id }) });
+      const response = await recoverProduction(request(owner.id, randomUUID(), { action: "resume", beatIds: [], confirmSpend: true }, `/api/productions/${job.id}/recovery`), { params: Promise.resolve({ id: job.id }) });
       expect(response.status).toBe(429);
       expect(await response.json()).toMatchObject({ code: "global_spend_cap_reached" });
       const after = await getStore().getJob(job.id);
       expect(after?.status).toBe(status);
       expect(after?.updatedAt).toBe(before?.updatedAt);
+    });
+
+    it("does not enlarge an exhausted production allowance without recovery confirmation", async () => {
+      const owner = user();
+      const job = await getStore().createJob(VideoCreateRequest.parse({ prompt: "An approved production with only five cents of allowance left.", durationSeconds: 60 }), owner);
+      await getStore().updateJob(job.id, { contentType: "explainer", status: "awaiting_user" });
+      await reserveBudget({ user: owner, scope: "create", videoJobId: job.id, estimatedCostCents: 200 });
+      process.env.PROVIDER_MODE = "live";
+      await reserveProviderAttempt({ videoId: job.id, scope: "saved-work", costCents: 195 });
+      process.env.PROVIDER_MODE = "mock";
+      const before = await getStore().getJob(job.id);
+      const response = await recoverProduction(request(owner.id, randomUUID(), { action: "resume", beatIds: [], confirmSpend: false }, `/api/productions/${job.id}/recovery`), { params: Promise.resolve({ id: job.id }) });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "recovery_spend_confirmation_required", estimatedCostCents: 50, remainingAuthorizedCents: 5 });
+      expect(await productionBudgetSnapshot(job.id)).toEqual({ authorizedCents: 200, committedCents: 195, remainingCents: 5 });
+      expect((await getStore().getJob(job.id))?.updatedAt).toBe(before?.updatedAt);
     });
 
     it("rechecks current editorial approvals before paid media submission", async () => {
@@ -133,6 +149,43 @@ export function hardeningContract() {
       expect((await budgetSnapshot()).reservedTodayCents).toBe(600);
       await reserveBudget({ user: owner, scope: "video_action_guard:regenerate_shot", key: randomUUID(), videoJobId: job.id, estimatedCostCents: 100 });
       expect((await budgetSnapshot()).reservedTodayCents).toBe(700);
+    });
+
+    it("reserves remaining editorial work after earlier drafts and narration without charging repeated approvals twice", async () => {
+      const owner = user();
+      const job = await getStore().createJob(VideoCreateRequest.parse({ prompt: "An editorial revision with existing provider reservations.", durationSeconds: 60 }), owner);
+      await reserveBudget({ user: owner, scope: "create", videoJobId: job.id, estimatedCostCents: 200 });
+      process.env.PROVIDER_MODE = "live";
+      await reserveProviderAttempt({ videoId: job.id, scope: "draft", costCents: 88 });
+      await reserveProviderAttempt({ videoId: job.id, scope: "first-narration", costCents: 38 });
+      const approval = { user: owner, scope: "approve", videoJobId: job.id, estimatedCostCents: 187, allowanceMode: "remaining" as const };
+      await reserveBudget({ ...approval, key: "revision-one" });
+      await reserveBudget({ ...approval, key: "revision-two" });
+      expect(await productionBudgetSnapshot(job.id)).toEqual({ authorizedCents: 313, committedCents: 126, remainingCents: 187 });
+      await reserveProviderAttempt({ videoId: job.id, scope: "revised-narration", costCents: 33 });
+      await reserveBudget({ ...approval, key: "revision-two" });
+      expect((await productionBudgetSnapshot(job.id))?.authorizedCents).toBe(313);
+      await reserveProviderAttempt({ videoId: job.id, scope: "visuals", costCents: 48 });
+      await reserveProviderAttempt({ videoId: job.id, scope: "render", costCents: 50 });
+      expect((await productionBudgetSnapshot(job.id))?.remainingCents).toBe(56);
+    });
+
+    it("tops up an exhausted editorial recovery through render and still enforces the daily cap", async () => {
+      const owner = user();
+      const job = await getStore().createJob(VideoCreateRequest.parse({ prompt: "Three saved visuals and one budget-blocked image.", durationSeconds: 60 }), owner);
+      await reserveBudget({ user: owner, scope: "create", videoJobId: job.id, estimatedCostCents: 200 });
+      process.env.PROVIDER_MODE = "live";
+      await reserveProviderAttempt({ videoId: job.id, scope: "saved-work", costCents: 195 });
+      await expect(reserveProviderAttempt({ videoId: job.id, scope: "image", costCents: 12 })).rejects.toMatchObject({ code: "production_budget_exhausted" });
+      process.env.DAILY_BUDGET_CAP_USD_GLOBAL = "2.50";
+      const recovery = { user: owner, scope: "resume_editorial_production", videoJobId: job.id, estimatedCostCents: 62, allowanceMode: "remaining" as const };
+      await expect(reserveBudget(recovery)).rejects.toMatchObject({ code: "global_spend_cap_reached" });
+      expect((await productionBudgetSnapshot(job.id))?.authorizedCents).toBe(200);
+      process.env.DAILY_BUDGET_CAP_USD_GLOBAL = "3";
+      await reserveBudget(recovery);
+      await reserveProviderAttempt({ videoId: job.id, scope: "image", costCents: 12 });
+      await reserveProviderAttempt({ videoId: job.id, scope: "render", costCents: 50 });
+      expect(await productionBudgetSnapshot(job.id)).toEqual({ authorizedCents: 257, committedCents: 257, remainingCents: 0 });
     });
 
     it("atomically reserves pending spending and enforces the global cap for exempt users", async () => {

@@ -9,6 +9,7 @@ import {
 } from "@/lib/server/spend-guard";
 
 type VideoActionInput = {
+  allowanceMode?: "remaining";
   action: string;
   estimatedCostCents: number;
   idempotencyKey?: string;
@@ -20,6 +21,7 @@ type VideoActionInput = {
 
 export async function assertVideoActionAllowed(input: VideoActionInput) {
   return assertProviderSpendAllowed({
+    allowanceMode: input.allowanceMode,
     user: input.user,
     projectId: input.job?.projectId,
     videoJobId: input.job?.id,

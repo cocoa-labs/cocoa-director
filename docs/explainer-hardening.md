@@ -40,3 +40,13 @@ Live source analysis selects bounded passage IDs through a strict structured res
 Source-analysis failures report whether the source is empty, lacks supported claims, or needs another analysis attempt. A deliberate retry gets a new request key only when analysis failed before any production was created; ambiguous errors retain duplicate protection. Logs contain counts and error types without article bodies or provider credentials. Provider guards remain authoritative even when the SDK wraps their errors.
 
 Regression coverage exercises URL extraction, the real OpenAI SDK and structured format, HTTP draft creation, citations, invalid evidence, spending guards and idempotent retries with substituted network responses. The browser regression covers failure-to-retry recovery with saved sources. These tests do not establish a live provider result.
+
+## Editorial pacing and recovery allowances
+
+New editorial scripts use a conservative 120-word-per-minute estimate and include scene-transition capacity in their word limits. Recorded narration remains authoritative. Fitting shows its own progress state and keeps version-specific approvals; it does not start a new production. Fit requests carry an idempotency key and charge the existing production allowance.
+
+Storyboard approval reserves the remaining work on top of earlier submitted calls. Recovery reserves provider headroom and the final render, keeps completed assets, and still enforces daily spending caps. The displayed maximum now comes from the reservation ledger. Submitted-call reservations can exceed the currently recorded charges; the UI exposes the remaining allowance instead of implying that every unbilled cent is free to spend.
+
+A failed visual remains recoverable while visual QA has not started. Approved productions show their downstream blocker, with a recovery action in the main review panel, rather than asking for their script to be approved again.
+
+Regression coverage includes the 117-word initial narration estimate, completed timing recovery, the exhausted 200-cent allowance with 195 cents already committed, a blocked top-up at the daily cap, recovery through the render allowance, and browser checks for fitting and pending-QA recovery. Paid provider output is not established by these mocked tests. Music-video behavior is unchanged.

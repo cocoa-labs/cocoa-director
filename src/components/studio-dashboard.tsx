@@ -1,6 +1,7 @@
 "use client";
 
 import { editorialNarrationTiming, editorialReviewStatus } from "@/lib/editorial-narration";
+import { editorialRecoveryAllowanceCents } from "@/lib/editorial-costs";
 
 import { upload } from "@vercel/blob/client";
 import Image from "next/image";
@@ -357,6 +358,7 @@ export function StudioDashboard({
   const [job, setJob] = useState<ApiJob | null>(null);
   const [productionProgress, setProductionProgress] = useState<ProductionProgressSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
+  const [fittingEditorial, setFittingEditorial] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorContext | null>(null);
   const [previewSelection, setPreviewSelection] = useState<PreviewSelection>({ kind: "auto" });
@@ -760,7 +762,9 @@ export function StudioDashboard({
   const editorialTiming = job && (job.job.contentType === "news_digest" || job.job.contentType === "explainer")
     ? editorialNarrationTiming(job.job)
     : undefined;
-  const visibleError = error ?? editorialTiming?.revisionMessage ?? job?.error ?? currentStep?.error ?? currentPhase?.error ?? null;
+  const visibleError = fittingEditorial ? null : error ?? editorialTiming?.revisionMessage ?? job?.error ?? currentStep?.error ?? currentPhase?.error ?? null;
+  const editorialScriptApproved = job?.job.approvals?.some((item) => item.gate === "script" && item.artifactVersionId === job.job.workflowSteps?.find((step) => step.id === "script")?.artifactVersionId);
+  const editorialStoryboardApproved = job?.job.approvals?.some((item) => item.gate === "storyboard" && item.artifactVersionId === job.job.workflowSteps?.find((step) => step.id === "storyboard")?.artifactVersionId);
   const selectedStyle = useMemo(
     () => STYLE_PRESETS.find((item) => item.id === stylePreset) ?? STYLE_PRESETS[0],
     [stylePreset],
@@ -1107,15 +1111,17 @@ export function StudioDashboard({
   async function fitEditorialToDuration() {
     if (!videoId || !job) return;
     setBusy(true);
+    setFittingEditorial(true);
     setError(null);
     try {
-      const response = await fetch(`/api/productions/${videoId}/fit-editorial`, { method: "POST" });
+      const response = await fetch(`/api/productions/${videoId}/fit-editorial`, { method: "POST", headers: { "Idempotency-Key": createClientIdempotencyKey() } });
       const json = await readApiJson<{ error?: string }>(response);
       if (!response.ok) throw new Error(json.error ?? "The script could not be fitted to the selected duration");
       setJob(await fetchJob(videoId));
     } catch (fitError) {
       setError(fitError instanceof Error ? fitError.message : "The script could not be fitted to the selected duration");
     } finally {
+      setFittingEditorial(false);
       setBusy(false);
     }
   }
@@ -1233,7 +1239,8 @@ export function StudioDashboard({
     const recoveryCostMessage = estimatedIncrementalCents === 0
       ? "No new provider spend is required."
       : `The estimated incremental cost is $${(estimatedIncrementalCents / 100).toFixed(2)}.`;
-    const message = `${qualityRecovery ? "Apply visual-quality corrections" : "Resume with identity-safe replacements"} for ${failedBeatIds.length} flagged beat${failedBeatIds.length === 1 ? "" : "s"}? ${recoveryCostMessage} All successful assets and approvals will be retained.`;
+    const remainingAllowanceCents = editorialRecoveryAllowanceCents(estimatedIncrementalCents);
+    const message = `${qualityRecovery ? "Apply visual-quality corrections" : "Resume with identity-safe replacements"} for ${failedBeatIds.length} flagged beat${failedBeatIds.length === 1 ? "" : "s"}? ${recoveryCostMessage} Authorize up to $${(remainingAllowanceCents / 100).toFixed(2)} for the remaining work, including provider headroom and the final render. All successful assets and approvals will be retained.`;
     if (!window.confirm(message)) return;
     await mutate(`/api/productions/${videoId}/recovery`, {
       action: qualityRecovery ? "retry_failed_beats" : "safe_retry",
@@ -1246,10 +1253,11 @@ export function StudioDashboard({
 
   async function resumeEditorialDelivery() {
     if (!videoId) return;
+    if (!window.confirm("Resume timing and delivery using the saved assets? Authorize up to $0.50 for the remaining render. Completed assets and approvals will be retained.")) return;
     await mutate(`/api/productions/${videoId}/recovery`, {
       action: "resume",
       beatIds: [],
-      confirmSpend: false,
+      confirmSpend: true,
     });
     const response = await fetch(`/api/productions/${videoId}/progress`, { cache: "no-store" });
     if (response.ok) setProductionProgress(await response.json() as ProductionProgressSnapshot);
@@ -2481,7 +2489,7 @@ export function StudioDashboard({
                     title={contentType !== "music_video" && hasUnreadySources ? "Wait for source processing or resolve failed sources" : "Command or Control plus Enter"}
                   >
                     <Sparkles className="h-4 w-4" aria-hidden />
-                    {busy
+                    {busy && !fittingEditorial
                       ? "Starting..."
                       : contentType === "music_video"
                         ? "Make Video"
@@ -2500,7 +2508,7 @@ export function StudioDashboard({
                     title={contentType !== "music_video" && hasUnreadySources ? "Wait for source processing or resolve failed sources" : "Command or Control plus Shift plus Enter"}
                   >
                     <Send className="h-4 w-4" aria-hidden />
-                    {busy
+                    {busy && !fittingEditorial
                       ? "Staging..."
                       : contentType === "music_video"
                         ? "Stage"
@@ -2535,6 +2543,14 @@ export function StudioDashboard({
                 </div>
 
                 {visibleError ? <ErrorDetail>{visibleError}</ErrorDetail> : null}
+                {fittingEditorial ? <div role="status" className="status-card text-sm text-accent"><Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> Fitting the script to duration. The revised script will appear here for review.</div> : null}
+                {productionProgress?.recoverable && productionProgress.units.some((unit) => (unit.kind === "image" || unit.kind === "video") && (unit.state === "failed" || unit.state === "needs_attention")) ? (
+                  <div className="status-card space-y-2 text-sm">
+                    <p>Your approved script and completed visuals are saved.</p>
+                    {productionProgress.costs.remainingAuthorizedCents !== undefined ? <p className="text-xs text-muted">Remaining allowance: ${(productionProgress.costs.remainingAuthorizedCents / 100).toFixed(2)}. Submitted calls reserve budget before final charges are known.</p> : null}
+                    <button type="button" className="primary-command w-full" disabled={busy} onClick={() => void resumeEditorialRecovery()}><RefreshCcw className="h-4 w-4" /> Review and resume unfinished visuals</button>
+                  </div>
+                ) : null}
                 {job?.job.contentType === "news_digest" && visibleError?.includes("Sources changed") ? (
                   <button type="button" className="primary-command w-full" disabled={busy} onClick={() => void regenerateNewsEditorial()}>
                     <RefreshCcw className="h-4 w-4" /> Regenerate cited draft
@@ -2555,10 +2571,10 @@ export function StudioDashboard({
                       <button type="button" className="secondary-command" disabled={busy || draftScript.trim() === job.job.script} onClick={() => void saveNewsScript()}><Save className="h-4 w-4" /> Save version</button>
                       {editorialFitNeeded ? (
                         <button type="button" className="primary-command" disabled={busy || draftScript.trim() !== job.job.script} onClick={() => void fitEditorialToDuration()}>
-                          <Sparkles className="h-4 w-4" /> {editorialCoverage !== undefined && editorialCoverage > 0.92 ? "Condense to" : "Fit to"} {formatSeconds(job.job.durationSeconds)}
+                          {fittingEditorial ? <><Loader2 className="h-4 w-4 animate-spin" /> Fitting script...</> : <><Sparkles className="h-4 w-4" /> {editorialCoverage !== undefined && editorialCoverage > 0.92 ? "Condense to" : "Fit to"} {formatSeconds(job.job.durationSeconds)}</>}
                         </button>
                       ) : (
-                        <button type="button" className="primary-command" disabled={busy || draftScript.trim() !== job.job.script} onClick={() => void approveNews("script")}><CheckCircle2 className="h-4 w-4" /> Approve script</button>
+                        <button type="button" className="primary-command" disabled={busy || editorialScriptApproved || draftScript.trim() !== job.job.script} onClick={() => void approveNews("script")}><CheckCircle2 className="h-4 w-4" /> {editorialScriptApproved ? "Script approved" : "Approve script"}</button>
                       )}
                     </div>
                     <div className="rounded-lg border border-border bg-black/10 p-3 text-xs">
@@ -2680,8 +2696,8 @@ export function StudioDashboard({
                             </div>
                           ))}
                         </div>
-                        <button type="button" className="primary-command w-full" disabled={busy} onClick={() => void approveNews("storyboard")}><Sparkles className="h-4 w-4" /> Approve storyboard &amp; generate</button>
-                        <div className="text-[11px] leading-4 text-muted">This confirms the displayed image/video calls and spend for narration, score, cinematic assets, graphics, validation, and the final render. Failed cinematic beats return for review rather than silently becoming static cards.</div>
+                        <button type="button" className="primary-command w-full" disabled={busy || editorialStoryboardApproved} onClick={() => void approveNews("storyboard")}><Sparkles className="h-4 w-4" /> {editorialStoryboardApproved ? "Storyboard approved" : "Approve storyboard & generate"}</button>
+                        <div className="text-[11px] leading-4 text-muted">Approval authorizes up to ${((job.job.estimatedCostCents + job.job.recoveryBudgetCents) / 100).toFixed(2)} for the remaining narration, score, visuals and render, in addition to calls already submitted. Completed assets are retained during recovery.</div>
                       </div>
                     ) : null}
                   </div>
@@ -5056,10 +5072,11 @@ function JobStatusCard({
             {unit.provider ? <div className="mt-1 font-mono">{unit.provider} · {unit.model ?? "default"}{unit.requestId ? ` · ${unit.requestId.slice(0, 12)}` : ""}</div> : null}
           </div>
         ))}
-        {failedUnits.length > 0 && !progress.visualQuality ? (
+        {failedUnits.length > 0 && !visualQualityNeedsAttention && !visualQualityActive ? (
           <div className="mt-3 rounded border border-danger/40 bg-danger/10 p-3">
             <strong className="text-danger">{failedUnits.length} work unit{failedUnits.length === 1 ? "" : "s"} need recovery</strong>
             <p className="mt-1 text-xs leading-5 text-muted">Successful assets remain locked. Recovery replaces only the failed cinematic beats with identity-safe alternatives.</p>
+            {progress.costs.remainingAuthorizedCents !== undefined ? <p className="mt-2 text-xs text-muted">${(progress.costs.remainingAuthorizedCents / 100).toFixed(2)} of the current allowance remains. Submitted calls reserve budget before their final charges are known. Review the remaining allowance before resuming.</p> : null}
             {onRecovery ? <button type="button" className="secondary-command mt-3 w-full" disabled={busy} onClick={onRecovery}><RefreshCcw className="h-4 w-4" /> Resume with safe recovery</button> : null}
           </div>
         ) : null}

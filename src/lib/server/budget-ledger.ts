@@ -119,12 +119,13 @@ async function checkCaps(values: Reservation[], user: UserContext) {
 
 export async function reserveBudget(input: {
   user: UserContext; scope: string; key?: string; estimatedCostCents: number; metadata?: Record<string, unknown>; videoJobId?: string;
+  allowanceMode?: "remaining";
 }) {
   assertProvidersEnabled();
   if (!Number.isSafeInteger(input.estimatedCostCents) || input.estimatedCostCents < 0) throw new ApiRequestError("Invalid cost estimate.", 400, "invalid_cost");
   const context = actionContext.getStore();
   const key = input.key ?? randomUUID();
-  const hash = context?.fingerprint ?? fingerprint({ scope: input.scope, estimate: input.estimatedCostCents, metadata: input.metadata });
+  const hash = context?.fingerprint ?? fingerprint({ scope: input.scope, estimate: input.estimatedCostCents, metadata: input.metadata, allowanceMode: input.allowanceMode });
   return criticalSection("provider-budget", async () => {
     const values = await reservations();
     const existing = values.find((value) => value.userId === input.user.id && value.scope === input.scope && value.key === key);
@@ -146,7 +147,13 @@ export async function reserveBudget(input: {
       }
       root.metadata = { ...root.metadata, settled: false, allowanceUpdatedAt: new Date().toISOString() };
       // Advancing consumes the original envelope; explicit regeneration/recovery adds a new allowance.
-      if (wasSettled || /(?:^|[:_])(?:regenerat(?:e|ion)|recover(?:y)?|edit|polish)(?:_|$)/.test(input.scope)) root.reservedCents += input.estimatedCostCents;
+      if (input.allowanceMode === "remaining") {
+        // A newly approved editorial version needs headroom after earlier calls,
+        // including conservative reservations whose final charge is not known.
+        const committed = values.filter((item) => item.metadata.parentId === root.id)
+          .reduce((sum, item) => sum + Math.max(item.reservedCents, item.actualCents), 0);
+        root.reservedCents = Math.max(root.reservedCents, committed + input.estimatedCostCents);
+      } else if (wasSettled || /(?:^|[:_])(?:regenerat(?:e|ion)|recover(?:y)?|edit|polish)(?:_|$)/.test(input.scope)) root.reservedCents += input.estimatedCostCents;
       else root.reservedCents = Math.max(root.reservedCents, input.estimatedCostCents);
     }
     await checkCaps([...values, value], input.user);
@@ -164,6 +171,22 @@ export async function bindReservation(scope: string, key: string | undefined, us
     const value = (await reservations()).find((value) => value.userId === userId && value.scope === scope && value.key === key);
     if (value) { value.metadata = { ...value.metadata, ...metadata }; await save(value); }
   });
+}
+
+/** Read only: report this production's actual allowance, not its planning estimate. */
+export async function productionBudgetSnapshot(videoId: string) {
+  const rows = hasDatabase() ? await getSql()`select id, reserved_cents, actual_cents, metadata from provider_reservations
+    where metadata->>'videoJobId' = ${videoId}
+      or metadata->>'parentId' in (select id::text from provider_reservations where metadata->>'videoJobId' = ${videoId})` : undefined;
+  const values = rows ? rows.map((row) => ({ id: String(row.id), reservedCents: Number(row.reserved_cents), actualCents: Number(row.actual_cents), metadata: row.metadata as Record<string, unknown> }))
+    : [...memoryLedger().values()];
+  const roots = values.filter((value) => value.metadata.videoJobId === videoId && !value.metadata.parentId);
+  if (roots.length === 0) return undefined;
+  const ids = new Set(roots.map((root) => root.id));
+  const authorizedCents = roots.reduce((sum, root) => sum + Math.max(root.reservedCents, root.actualCents), 0);
+  const committedCents = values.filter((value) => ids.has(String(value.metadata.parentId)))
+    .reduce((sum, value) => sum + Math.max(value.reservedCents, value.actualCents), 0);
+  return { authorizedCents, committedCents, remainingCents: Math.max(0, authorizedCents - committedCents) };
 }
 
 /** Reserve each actual attempt, including retries, before submitting to a paid provider. */

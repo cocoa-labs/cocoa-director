@@ -785,6 +785,8 @@ export const ProductionProgressSnapshot = z.object({
     estimatedBaseCents: z.number().int().nonnegative(),
     recoveryReserveCents: z.number().int().nonnegative(),
     maximumAuthorizedCents: z.number().int().nonnegative(),
+    committedCents: z.number().int().nonnegative().optional(),
+    remainingAuthorizedCents: z.number().int().nonnegative().optional(),
     actualCents: z.number().int().nonnegative(),
     recoverySpentCents: z.number().int().nonnegative(),
     remainingRecoveryCents: z.number().int().nonnegative(),

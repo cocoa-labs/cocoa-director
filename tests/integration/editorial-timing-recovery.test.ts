@@ -25,7 +25,7 @@ describe("measured editorial timing recovery", () => {
 
   it("recovers the 62-second narration without reapproving or reusing its old audio", async () => {
     const draft = await fixture();
-    expect(narrationBudgetSummary(draft.script!, 60).predictedDurationMs).toBe(51_064);
+    expect(narrationBudgetSummary(draft.script!, 60).predictedDurationMs).toBe(60_000);
     await addMeasurements(draft, recordedDurations);
     const result = await reconcileEditorialTiming(draft.id);
     expect(result.requiresScriptRevision).toBe(true);
@@ -65,6 +65,23 @@ describe("measured editorial timing recovery", () => {
     const measured = (await getStore().getJob(draft.id))!;
     expect(editorialNarrationTiming(measured).requiresRevision).toBe(false);
     await expect(approveNewsGate({ job: measured, user, gate: "script", artifactVersionId: scriptVersion })).resolves.toBeDefined();
+  });
+
+  it("flags the observed 117-word script before recording at the conservative initial pace", () => {
+    const budget = narrationBudgetSummary(Array(117).fill("word").join(" "), 60);
+    expect(budget.predictedDurationMs).toBe(58_500);
+    expect(budget.withinBudget).toBe(false);
+    expect(narrationBudgetSummary(Array(104).fill("word").join(" "), 60).withinBudget).toBe(true);
+  });
+
+  it("reports a downstream blocker after both versions are approved", async () => {
+    const draft = await fixture();
+    await addMeasurements(draft, Array(6).fill(8_800));
+    await reconcileEditorialTiming(draft.id);
+    const measured = (await getStore().getJob(draft.id))!;
+    measured.workflowSteps = measured.workflowSteps!.map((step) => step.id === "storyboard" ? { ...step, artifactVersionId: "51000000-0000-4000-8000-000000000002" } : step);
+    const approvals = ["script", "storyboard"].map((gate) => ({ gate, artifactVersionId: measured.workflowSteps!.find((step) => step.id === gate)!.artifactVersionId!, approvedBy: user.id, approvedAt: new Date().toISOString() })) as VideoJob["approvals"];
+    expect(editorialReviewStatus({ ...measured, approvals, status: "awaiting_user", error: "A visual needs more reserved budget." })).toEqual({ title: "Production needs attention", detail: "A visual needs more reserved budget." });
   });
 
   it("keeps measured timing authoritative at delivery for a faster recorded voice", async () => {

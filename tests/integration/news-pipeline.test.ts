@@ -23,7 +23,7 @@ describe("news digest v2 pipeline", () => {
   it("keeps generation behind two versioned approvals and exports a final delivery", async () => {
     const project = await getStore().createProject({ userId: user.id, name: "News fixture" });
     const text = Array.from({ length: 16 }, (_, index) =>
-      `Verified source point ${index + 1} describes a documented policy outcome with attributable context and a measurable result.`
+      `Verified point ${index + 1} documents a policy outcome with attributable measured results.`
     ).join(" ");
     const source = await addTextProductionSource({ projectId: project.id, title: "Policy report", text, user });
     const request = ProductionCreateRequest.parse({

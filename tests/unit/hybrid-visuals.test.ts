@@ -69,7 +69,7 @@ describe("hybrid cinematic editorial planning", () => {
 
   it("reserves narration time before approval", () => {
     const summary = narrationBudgetSummary(Array.from({ length: 140 }, () => "word").join(" "), 60);
-    expect(summary.budgetWords).toBe(129);
+    expect(summary.budgetWords).toBe(110);
     expect(summary.withinBudget).toBe(false);
   });
 
